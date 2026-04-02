@@ -59,6 +59,7 @@ class BaseTask():
         # todo: read from config
         self.enable_viewer_sync = True
         self.viewer = None
+        self.follow_cam = False
 
         # if running with a viewer, set up keyboard shortcuts and camera
         if self.headless == False:
@@ -121,6 +122,9 @@ class BaseTask():
             for evt in self.gym.query_viewer_action_events(self.viewer):
                 self.handle_viewer_action_event(evt)
 
+            if self.follow_cam:
+                self.update_viewer_camera()
+
             # fetch results
             if self.device != 'cpu':
                 self.gym.fetch_results(self.sim, True)
@@ -139,6 +143,8 @@ class BaseTask():
             sys.exit()
         elif evt.action == "toggle_viewer_sync" and evt.value > 0:
             self.enable_viewer_sync = not self.enable_viewer_sync
+        elif evt.action == "free_cam" and evt.value > 0:
+            self.follow_cam = not self.follow_cam
         
         if evt.action == "pause" and evt.value > 0:
             self.pause = True
@@ -148,3 +154,7 @@ class BaseTask():
                 for evt in self.gym.query_viewer_action_events(self.viewer):
                     if evt.action == "pause" and evt.value > 0:
                         self.pause = False
+
+    def update_viewer_camera(self):
+        """Optional per-frame viewer camera update hook for subclasses."""
+        return

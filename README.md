@@ -20,10 +20,10 @@ Conference on Robot Learning (CoRL) 2025 Best paper
 
 ## Overview
 
-This project implements a reinforcement learning-based whole body control framework for B2Z1 robots, supporting unified policy learning for both position and force control. The framework uses Isaac Gym for simulation training and supports deployment from simulation to real robots.
+This project implements a reinforcement learning-based whole body control framework for quadruped-plus-arm robots, with the current training setup adapted for Go2+Piper unified position and force control. The framework uses Isaac Gym for simulation training and supports deployment from simulation to real robots.
 
 **Key Features**:
-- Support for B2Z1 robot whole body control
+- Support for Go2+Piper whole body control
 - Unified policy learning for position and force control
 - Reinforcement learning training based on PPO algorithm
 - Support for multiple robot configurations (B2Z1, G1, etc.)
@@ -82,24 +82,24 @@ This project implements a reinforcement learning-based whole body control framew
 
 ### Policy Training
 
-#### B2Z1 Position-Force Control Training
+#### Go2+Piper Position-Force Control Training
 ```bash
 cd legged_gym/scripts
-python train_b2z1posforce.py --task=b2z1_pos_force --headless
+python train_go2piperposforce.py --task=go2_piper_pos_force --headless
 ```
 
 ### Policy Evaluation and Testing
 
 #### Run Trained Policies
 ```bash
-# B2Z1 position-force control testing
-python play_b2z1posforce.py --task=b2z1_pos_force --load_run=<run_name>
+# Go2+Piper position-force control testing
+python play_go2piperposforce.py --task=go2_piper_pos_force --load_run=<run_name>
 ```
 
 ### Parameter Configuration
 
 #### Training Parameters
-- `--task`: Task name (b2z1_pos_force, b2z1_force_realrobot, h1, g1_humanoidgym, etc.)
+- `--task`: Task name (`go2_piper_pos_force`, `b2z1_pos_force`, etc.)
 - `--headless`: Run in headless mode
 - `--num_envs`: Number of parallel environments
 - `--max_iterations`: Maximum training iterations
@@ -112,13 +112,13 @@ python play_b2z1posforce.py --task=b2z1_pos_force --load_run=<run_name>
 
 ### Core Components
 
-- **Environment Configuration** (`legged_gym/envs/b2/b2z1_pos_force_config.py`)
+- **Environment Configuration** (`legged_gym/envs/go2/go2_piper_pos_force_config.py`)
   - Robot initial state configuration
   - Reward function parameters
   - Observation space definition
   - Action space definition
 
-- **Environment Implementation** (`legged_gym/envs/b2/legged_robot_b2z1_pos_force.py`)
+- **Environment Implementation** (`legged_gym/envs/go2/legged_robot_go2_piper_pos_force.py`)
   - Simulation environment logic
   - Reward calculation
   - Observation space construction
@@ -129,8 +129,7 @@ python play_b2z1posforce.py --task=b2z1_pos_force --load_run=<run_name>
   - Policy network structure
   - Value network structure
 
-- **Task Registration** (`legged_gym/utils/task_registry_b2z1posforce.py`)
+- **Task Registration** (`legged_gym/envs/__init__.py`)
   - Task registration management
   - Environment creation
   - Trainer creation
-

@@ -6,6 +6,7 @@ wandb
 debug.py
 ckpt
 .history
+.codex
 *.png
 isaac-gym-preview-4
 isaacgym

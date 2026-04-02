@@ -16,6 +16,8 @@ from mpl_toolkits.mplot3d import Axes3D
 import numpy as np
 import time
 
+ENABLE_PLAY_CMD_FORCE = False
+
 
 def play(args):
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
@@ -129,6 +131,10 @@ def play(args):
     
 
     env.play = True
+    env.enable_gripper_cmd_force = ENABLE_PLAY_CMD_FORCE
+    env.enable_play_immediate_gripper_cmd_force = ENABLE_PLAY_CMD_FORCE
+    if env.viewer:
+        print("Viewer controls: press F to toggle follow camera on the current robot.")
     policy_info = {}
     for i in range(100*int(env.max_episode_length)):
         actions = policy(obs, policy_info)

@@ -101,6 +101,7 @@ class B2Z1PosForceRoughCfg( LeggedRobotCfg ):
 
     class env( LeggedRobotCfg.env ):
 
+        num_leg_dofs = 12
         num_gripper_joints = 2
         num_actions = 17
         num_torques = 17
@@ -235,12 +236,14 @@ class B2Z1PosForceRoughCfg( LeggedRobotCfg ):
         decimation = 4
     
     class arm:
+        base_offset = [0.2, 0.0, 0.225]
         init_target_ee_base = [0.2, 0.0, 0.2]
         grasp_offset = 0.08
 
     class asset( LeggedRobotCfg.asset ):
-        file = 'resources/robots/b2z1/b2z1.urdf'
+        file = '{LEGGED_GYM_ROOT_DIR}/resources/robots/b2z1/b2z1.urdf'
         name = "b2z1"
+        base_name = "base_link"
         foot_name = "foot"
         thigh_name = "thigh"
         gripper_name = "ee_gripper_link"

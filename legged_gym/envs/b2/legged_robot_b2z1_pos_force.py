@@ -63,6 +63,8 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
         self.height_samples = None
         self.debug_viz = True
         self.debug_curve = False
+        self.enable_gripper_cmd_force = True
+        self.enable_play_immediate_gripper_cmd_force = False
         if self.debug_curve:
             self.FL_joint_index = 2
             self.FR_joint_index = 5
@@ -90,6 +92,9 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
         self.num_pred_obs = self.cfg.env.num_pred_obs
         self.num_single_obs = self.cfg.env.num_single_obs
         self.obs_pred = torch.zeros(self.num_envs, self.num_pred_obs, device=self.device, dtype=torch.float)
+        follow_offset_scale = getattr(self.cfg.viewer, "follow_offset_scale", 1.0)
+        self.viewer_follow_offset = (np.array(self.cfg.viewer.pos) - np.array(self.cfg.viewer.lookat)) * follow_offset_scale
+        self.viewer_follow_target_height = getattr(self.cfg.viewer, "follow_target_height", 0.2)
 
         if not self.headless:
             self.set_camera(self.cfg.viewer.pos, self.cfg.viewer.lookat)
@@ -122,7 +127,8 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
             if self.device == 'cpu':
                 self.gym.fetch_results(self.sim, True)
 
-            if self.global_steps > self.cfg.commands.force_start_step * 24:
+            enable_play_cmd_force = self.play and self.enable_play_immediate_gripper_cmd_force
+            if self.global_steps > self.cfg.commands.force_start_step * 24 or enable_play_cmd_force:
                 # push gripper
                 self._push_gripper(torch.arange(self.num_envs, device=self.device))      
                 # push robot base 
@@ -384,20 +390,19 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
                                     self.forces_local[:, self.gripper_idx] * self.obs_scales.ee_force, # 3
                                     self.forces_local[:, self.robot_base_idx] * self.obs_scales.base_force, # 3
                                     diff, # 12
-                                    self.mass_params_tensor, # 22
+                                    self.mass_params_tensor,
                                     self.friction_coeffs_tensor, #  1
-                                    self.motor_strength[:, :17] - 1, # 17
+                                    self.motor_strength - 1,
                                     stance_mask, # 4
                                     contact_mask, # 4
                                     self.projected_gravity, # 3
                                     self.base_ang_vel * self.obs_scales.ang_vel,  # dim 3
-                                    ((self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos)[:, :-self.cfg.env.num_gripper_joints], # dim 17
-                                    (self.dof_vel * self.obs_scales.dof_vel)[:, :-self.cfg.env.num_gripper_joints], # dim 17
-                                    self.actions[:, :17], # dim 17
+                                    ((self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos)[:, :-self.cfg.env.num_gripper_joints],
+                                    (self.dof_vel * self.obs_scales.dof_vel)[:, :-self.cfg.env.num_gripper_joints],
+                                    self.actions[:, :self.num_torques],
                                     sin_pos, # 1
                                     cos_pos, # 1
                                     (self.commands * self.commands_scale)[:, :15], # dim 15
-                                    # base_lin_vel_offset * self.obs_scales.lin_vel, # dim 2
                                     ee_goal_offset_local_sphere[:, 0:1] * self.obs_scales.ee_sphe_radius_cmd, 
                                     ee_goal_offset_local_sphere[:, 1:2] * self.obs_scales.ee_sphe_pitch_cmd,
                                     ee_goal_offset_local_sphere[:, 2:3] * self.obs_scales.ee_sphe_yaw_cmd, # 3
@@ -413,9 +418,9 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
         
         obs_buf = torch.cat(( self.get_body_orientation(),  # dim 2
                                     self.base_ang_vel * self.obs_scales.ang_vel,  # dim 3
-                                    ((self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos)[:, :-self.cfg.env.num_gripper_joints], # dim 17
-                                    (self.dof_vel * self.obs_scales.dof_vel)[:, :-self.cfg.env.num_gripper_joints], # dim 17
-                                    self.actions[:, :17], # dim 17
+                                    ((self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos)[:, :-self.cfg.env.num_gripper_joints],
+                                    (self.dof_vel * self.obs_scales.dof_vel)[:, :-self.cfg.env.num_gripper_joints],
+                                    self.actions[:, :self.num_torques],
                                     sin_pos, # 1
                                     cos_pos, # 1
                                     (self.commands * self.commands_scale)[:, :15], # dim 15
@@ -456,6 +461,24 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
         cam_pos = gymapi.Vec3(position[0], position[1], position[2])
         cam_target = gymapi.Vec3(lookat[0], lookat[1], lookat[2])
         self.gym.viewer_camera_look_at(self.viewer, None, cam_pos, cam_target)
+
+    def update_viewer_camera(self):
+        if not self.viewer or not self.follow_cam:
+            return
+
+        env_idx = 0
+        base_pos = self.root_states[env_idx, :3].detach().cpu().numpy()
+        cam_target = gymapi.Vec3(
+            base_pos[0],
+            base_pos[1],
+            base_pos[2] + self.viewer_follow_target_height,
+        )
+        cam_pos = gymapi.Vec3(
+            base_pos[0] + self.viewer_follow_offset[0],
+            base_pos[1] + self.viewer_follow_offset[1],
+            base_pos[2] + self.viewer_follow_offset[2],
+        )
+        self.gym.viewer_camera_look_at(self.viewer, self.envs[env_idx], cam_pos, cam_target)
 
     def _draw_curve(self):
         if self.debug_curve:
@@ -540,12 +563,12 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
             plt.pause(0.001)
             # print(self.commands)
     def _draw_collision_bbox(self):
-
+        # WireframeBBoxGeometry expects bbox[0] = min corner and bbox[1] = max corner
+        # in the local frame of the supplied pose.
         center = self.ee_goal_center_offset
-        bbox0 = center + self.collision_upper_limits
-        bbox1 = center + self.collision_lower_limits
-        bboxes = torch.stack([bbox0, bbox1], dim=1)
-        sphere_geom = gymutil.WireframeSphereGeometry(0.05, 4, 4, None, color=(1, 1, 0))
+        bbox_min = center + self.collision_lower_limits
+        bbox_max = center + self.collision_upper_limits
+        bboxes = torch.stack([bbox_min, bbox_max], dim=1)
 
         for i in range(self.num_envs):
             bbox_geom = gymutil.WireframeBBoxGeometry(bboxes[i], None, color=(1, 0, 0))
@@ -560,14 +583,15 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
             Default behaviour: draws height measurement points
         """
         # self.gym.refresh_rigid_body_state_tensor(self.sim)
-        sphere_geom = gymutil.WireframeSphereGeometry(0.05, 4, 4, None, color=(1, 1, 0))
-
-        sphere_geom_4 = gymutil.WireframeSphereGeometry(0.05, 4, 4, None, color=(1, 0, 1))
-
-        sphere_geom_3 = gymutil.WireframeSphereGeometry(0.05, 16, 16, None, color=(0, 1, 1))
-        upper_arm_pose = self.get_ee_goal_spherical_center()
-
-        sphere_geom_2 = gymutil.WireframeSphereGeometry(0.05, 4, 4, None, color=(0, 0, 1))
+        # Yellow: nominal EE goal from the sampled spherical command.
+        nominal_goal_geom = gymutil.WireframeSphereGeometry(0.06, 8, 8, None, color=(1, 1, 0))
+        # Magenta: force-offset EE goal after compensating for commanded/external wrench.
+        offset_goal_geom = gymutil.WireframeSphereGeometry(0.04, 8, 8, None, color=(1, 0, 1))
+        # Cyan: spherical command center used to parameterize the EE target.
+        spherical_center_geom = gymutil.WireframeSphereGeometry(0.05, 16, 16, None, color=(0, 1, 1))
+        spherical_center_pose = self.get_ee_goal_spherical_center()
+        # Blue: actual current EE pose.
+        ee_pose_geom = gymutil.WireframeSphereGeometry(0.05, 8, 8, None, color=(0, 0, 1))
         ee_pose = self.rigid_state[:, self.gripper_idx, :3]
 
         sphere_geom_origin = gymutil.WireframeSphereGeometry(0.1, 8, 8, None, color=(0, 1, 0))
@@ -582,19 +606,42 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
         forces_cmd_global = quat_apply(self.base_yaw_quat, forces_cmd)
         forces_offset = (forces_global + forces_cmd_global)
         curr_ee_goal_cart_world_offset = forces_offset / self.gripper_force_kps + self.curr_ee_goal_cart_world
+        offset_error = torch.norm(curr_ee_goal_cart_world_offset - self.curr_ee_goal_cart_world, dim=1)
 
         for i in range(self.num_envs):
-            sphere_pose = gymapi.Transform(gymapi.Vec3(self.curr_ee_goal_cart_world[i, 0], self.curr_ee_goal_cart_world[i, 1], self.curr_ee_goal_cart_world[i, 2]), r=None)
-            gymutil.draw_lines(sphere_geom, self.gym, self.viewer, self.envs[i], sphere_pose) 
+            nominal_goal_pose = gymapi.Transform(
+                gymapi.Vec3(
+                    self.curr_ee_goal_cart_world[i, 0],
+                    self.curr_ee_goal_cart_world[i, 1],
+                    self.curr_ee_goal_cart_world[i, 2],
+                ),
+                r=None,
+            )
+            gymutil.draw_lines(nominal_goal_geom, self.gym, self.viewer, self.envs[i], nominal_goal_pose)
 
-            sphere_pose_4 = gymapi.Transform(gymapi.Vec3(curr_ee_goal_cart_world_offset[i, 0], curr_ee_goal_cart_world_offset[i, 1], curr_ee_goal_cart_world_offset[i, 2]), r=None)
-            gymutil.draw_lines(sphere_geom_4, self.gym, self.viewer, self.envs[i], sphere_pose_4) 
+            if offset_error[i] > 1e-4:
+                offset_goal_pose = gymapi.Transform(
+                    gymapi.Vec3(
+                        curr_ee_goal_cart_world_offset[i, 0],
+                        curr_ee_goal_cart_world_offset[i, 1],
+                        curr_ee_goal_cart_world_offset[i, 2],
+                    ),
+                    r=None,
+                )
+                gymutil.draw_lines(offset_goal_geom, self.gym, self.viewer, self.envs[i], offset_goal_pose)
             
             sphere_pose_2 = gymapi.Transform(gymapi.Vec3(ee_pose[i, 0], ee_pose[i, 1], ee_pose[i, 2]), r=None)
-            gymutil.draw_lines(sphere_geom_2, self.gym, self.viewer, self.envs[i], sphere_pose_2) 
+            gymutil.draw_lines(ee_pose_geom, self.gym, self.viewer, self.envs[i], sphere_pose_2) 
 
-            sphere_pose_3 = gymapi.Transform(gymapi.Vec3(upper_arm_pose[i, 0], upper_arm_pose[i, 1], upper_arm_pose[i, 2]), r=None)
-            gymutil.draw_lines(sphere_geom_3, self.gym, self.viewer, self.envs[i], sphere_pose_3) 
+            sphere_pose_3 = gymapi.Transform(
+                gymapi.Vec3(
+                    spherical_center_pose[i, 0],
+                    spherical_center_pose[i, 1],
+                    spherical_center_pose[i, 2],
+                ),
+                r=None,
+            )
+            gymutil.draw_lines(spherical_center_geom, self.gym, self.viewer, self.envs[i], sphere_pose_3) 
 
             pose = gymapi.Transform(gymapi.Vec3(self.curr_ee_goal_cart_world[i, 0], self.curr_ee_goal_cart_world[i, 1], self.curr_ee_goal_cart_world[i, 2]), 
                                     r=gymapi.Quat(self.ee_goal_orn_quat[i, 0], self.ee_goal_orn_quat[i, 1], self.ee_goal_orn_quat[i, 2], self.ee_goal_orn_quat[i, 3]))
@@ -782,20 +829,20 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
         if self.cfg.domain_rand.randomize_base_mass:
             rng = self.cfg.domain_rand.added_mass_range
             rand_mass = np.random.uniform(rng[0], rng[1], size=(1, ))
-            props[0].mass += rand_mass
+            props[self.robot_base_idx].mass += rand_mass
         else:
             rand_mass = np.zeros(1)
 
         if self.cfg.domain_rand.randomize_leg_mass:
             rng_link = self.cfg.domain_rand.leg_mass_scale_range
             rand_leg_masses = []
-            for idx in range(17):
+            for idx in self.mass_randomized_body_indices:
                 rand_link_mass = np.random.uniform(rng_link[0], rng_link[1], size=(1, )) * props[idx].mass
                 props[idx].mass += rand_link_mass
                 rand_leg_masses.append(rand_link_mass)
             rand_leg_masses = np.concatenate(rand_leg_masses)
         else:
-            rand_leg_masses = np.zeros(17)
+            rand_leg_masses = np.zeros(len(self.mass_randomized_body_indices))
 
         if self.cfg.domain_rand.randomize_gripper_mass:
             gripper_rng_mass = self.cfg.domain_rand.gripper_added_mass_range
@@ -809,7 +856,7 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
             rng_com_y = self.cfg.domain_rand.added_com_range_y
             rng_com_z = self.cfg.domain_rand.added_com_range_z
             rand_com = np.random.uniform([rng_com_x[0], rng_com_y[0], rng_com_z[0]], [rng_com_x[1], rng_com_y[1], rng_com_z[1]], size=(3, ))
-            props[1].com += gymapi.Vec3(*rand_com)
+            props[self.robot_base_idx].com += gymapi.Vec3(*rand_com)
         else:
             rand_com = np.zeros(3)
         
@@ -877,10 +924,12 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
         actions_scaled = actions * self.motor_strength * self.cfg.control.action_scale
 
         default_torques = self.p_gains * (actions_scaled + self.default_dof_pos_wo_gripper - self.dof_pos_wo_gripper) - self.d_gains * self.dof_vel_wo_gripper
-        last_torque = 64. * (torch.zeros([actions_scaled.shape[0], 1], device=actions_scaled.device) + self.default_dof_pos[:, -2] - self.dof_pos[:, -2:-1]) - 1.5 * self.dof_vel[:, -2:-1]
-        gripper_torque = 64. * (torch.zeros([actions_scaled.shape[0], 1], device=actions_scaled.device) + self.default_dof_pos[:, -1] - self.dof_pos[:, -1:]) - 1.5 * self.dof_vel[:, -1:]
-        
-        torques = torch.cat([default_torques, last_torque, gripper_torque], dim=-1)
+        gripper_pos = self.dof_pos[:, self.num_torques:]
+        gripper_vel = self.dof_vel[:, self.num_torques:]
+        gripper_target = self.default_dof_pos[:, self.num_torques:]
+        gripper_torque = self.gripper_p_gains.unsqueeze(0) * (gripper_target - gripper_pos) - self.gripper_d_gains.unsqueeze(0) * gripper_vel
+
+        torques = torch.cat([default_torques, gripper_torque], dim=-1)
 
         return torch.clip(torques, -self.torque_limits, self.torque_limits)
 
@@ -986,8 +1035,9 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
             env_ids (List[int]): Environemnt ids
         """
         self.dof_pos[env_ids] = self.default_dof_pos
-        self.dof_pos[env_ids, :12] = self.default_dof_pos[:, :12]* torch_rand_float(0.5, 1.5, (len(env_ids), 12), device=self.device)
-        self.dof_pos[env_ids, 12:17] += torch_rand_float(-0.5, 0.5, (len(env_ids), self.num_actions-12), device=self.device)
+        self.dof_pos[env_ids, :self.num_leg_dofs] = self.default_dof_pos[:, :self.num_leg_dofs] * torch_rand_float(0.5, 1.5, (len(env_ids), self.num_leg_dofs), device=self.device)
+        if self.num_torques > self.num_leg_dofs:
+            self.dof_pos[env_ids, self.num_leg_dofs:self.num_torques] += torch_rand_float(-0.5, 0.5, (len(env_ids), self.num_torques - self.num_leg_dofs), device=self.device)
         self.dof_vel[env_ids] = 0.
 
         env_ids_int32 = env_ids.to(dtype=torch.int32)
@@ -1041,73 +1091,82 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
         if self.cfg.commands.push_gripper_stators:
             # cmd force
             # FORCE CONTROLLED ENVS
-            new_selected_env_ids_cmd = env_ids_all[(self.episode_length_buf % self.push_interval_gripper_cmd[:, 0]) == 0]
-            
-            # Define force and duration for the push 
-            if new_selected_env_ids_cmd.nelement() > 0:
+            if self.enable_gripper_cmd_force:
+                new_selected_env_ids_cmd = env_ids_all[(self.episode_length_buf % self.push_interval_gripper_cmd[:, 0]) == 0]
                 
-                self.freed_envs_gripper_cmd[new_selected_env_ids_cmd] = torch.rand(len(new_selected_env_ids_cmd), dtype=torch.float, device=self.device, requires_grad=False) > self.cfg.commands.gripper_forced_prob_cmd
-                min_force_cmd = self.cfg.commands.max_push_force_xyz_gripper_cmd[0]
-                max_force_cmd = self.cfg.commands.max_push_force_xyz_gripper_cmd[1]
-
-                self.force_target_gripper_cmd[new_selected_env_ids_cmd, 0] = torch_rand_float(min_force_cmd, max_force_cmd, (len(new_selected_env_ids_cmd), 1), device=self.device).view(len(new_selected_env_ids_cmd))
-                self.force_target_gripper_cmd[new_selected_env_ids_cmd, 1] = torch_rand_float(min_force_cmd, max_force_cmd, (len(new_selected_env_ids_cmd), 1), device=self.device).view(len(new_selected_env_ids_cmd))
-                self.force_target_gripper_cmd[new_selected_env_ids_cmd, 2] = torch_rand_float(min_force_cmd, max_force_cmd, (len(new_selected_env_ids_cmd), 1), device=self.device).view(len(new_selected_env_ids_cmd))
-                push_duration_gripper_cmd = torch_rand_float(self.push_duration_gripper_cmd_min, self.push_duration_gripper_cmd_max, (len(new_selected_env_ids_cmd), 1), device=self.device).view(len(new_selected_env_ids_cmd)) # 4.0/self.dt
-                push_duration_gripper_cmd = torch.clip(push_duration_gripper_cmd, max=(self.push_interval_gripper_cmd[new_selected_env_ids_cmd, 0] - self.settling_time_force_gripper)/2).to(self.device)
-                self.push_end_time_gripper_cmd[new_selected_env_ids_cmd] = self.episode_length_buf[new_selected_env_ids_cmd] + push_duration_gripper_cmd
-                self.push_duration_gripper_cmd[new_selected_env_ids_cmd] = push_duration_gripper_cmd
-                
-                self.selected_env_ids_gripper_cmd[new_selected_env_ids_cmd] = 1
-                
-            # Get ids of all envs to apply a force to 
-            if self.episode_length_buf[self.selected_env_ids_gripper_cmd == 1].nelement() > 0:
-                subset_env_ids_selected = env_ids_all[self.selected_env_ids_gripper_cmd == 1]
-
-                # Step 1: apply force from 0 to force_target_gripper_cmd
-                env_ids_apply_push_step1 = subset_env_ids_selected[self.episode_length_buf[self.selected_env_ids_gripper_cmd == 1] < (self.push_end_time_gripper_cmd[self.selected_env_ids_gripper_cmd == 1]).type(torch.int32)]
-                # print(env_ids_apply_push_step1)
-                if env_ids_apply_push_step1.nelement() > 0:
-                    push_duration_reshaped = self.push_duration_gripper_cmd[env_ids_apply_push_step1].unsqueeze(-1)
+                # Define force and duration for the push 
+                if new_selected_env_ids_cmd.nelement() > 0:
                     
-                    self.current_Fxyz_gripper_cmd[env_ids_apply_push_step1, :3] = (self.force_target_gripper_cmd[env_ids_apply_push_step1, :3]/push_duration_reshaped)*(torch.clamp(self.episode_length_buf[env_ids_apply_push_step1].unsqueeze(-1) - (self.push_end_time_gripper_cmd[env_ids_apply_push_step1].unsqueeze(-1)-push_duration_reshaped), torch.zeros_like(push_duration_reshaped), push_duration_reshaped))
+                    self.freed_envs_gripper_cmd[new_selected_env_ids_cmd] = torch.rand(len(new_selected_env_ids_cmd), dtype=torch.float, device=self.device, requires_grad=False) > self.cfg.commands.gripper_forced_prob_cmd
+                    min_force_cmd = self.cfg.commands.max_push_force_xyz_gripper_cmd[0]
+                    max_force_cmd = self.cfg.commands.max_push_force_xyz_gripper_cmd[1]
+
+                    self.force_target_gripper_cmd[new_selected_env_ids_cmd, 0] = torch_rand_float(min_force_cmd, max_force_cmd, (len(new_selected_env_ids_cmd), 1), device=self.device).view(len(new_selected_env_ids_cmd))
+                    self.force_target_gripper_cmd[new_selected_env_ids_cmd, 1] = torch_rand_float(min_force_cmd, max_force_cmd, (len(new_selected_env_ids_cmd), 1), device=self.device).view(len(new_selected_env_ids_cmd))
+                    self.force_target_gripper_cmd[new_selected_env_ids_cmd, 2] = torch_rand_float(min_force_cmd, max_force_cmd, (len(new_selected_env_ids_cmd), 1), device=self.device).view(len(new_selected_env_ids_cmd))
+                    push_duration_gripper_cmd = torch_rand_float(self.push_duration_gripper_cmd_min, self.push_duration_gripper_cmd_max, (len(new_selected_env_ids_cmd), 1), device=self.device).view(len(new_selected_env_ids_cmd)) # 4.0/self.dt
+                    push_duration_gripper_cmd = torch.clip(push_duration_gripper_cmd, max=(self.push_interval_gripper_cmd[new_selected_env_ids_cmd, 0] - self.settling_time_force_gripper)/2).to(self.device)
+                    self.push_end_time_gripper_cmd[new_selected_env_ids_cmd] = self.episode_length_buf[new_selected_env_ids_cmd] + push_duration_gripper_cmd
+                    self.push_duration_gripper_cmd[new_selected_env_ids_cmd] = push_duration_gripper_cmd
                     
-                    self.commands[env_ids_apply_push_step1, INDEX_EE_FORCE_X] = self.current_Fxyz_gripper_cmd[env_ids_apply_push_step1, 0] #torch.norm(self.current_Fxyz_gripper_cmd[env_ids_apply_push_step1, :2], dim=1)
-                    self.commands[env_ids_apply_push_step1, INDEX_EE_FORCE_Y] = self.current_Fxyz_gripper_cmd[env_ids_apply_push_step1, 1] #torch.atan2(self.current_Fxyz_gripper_cmd[env_ids_apply_push_step1, 1], self.current_Fxyz_gripper_cmd[env_ids_apply_push_step1, 0])
-                    self.commands[env_ids_apply_push_step1, INDEX_EE_FORCE_Z] = self.current_Fxyz_gripper_cmd[env_ids_apply_push_step1, 2]
+                    self.selected_env_ids_gripper_cmd[new_selected_env_ids_cmd] = 1
+                    
+                # Get ids of all envs to apply a force to 
+                if self.episode_length_buf[self.selected_env_ids_gripper_cmd == 1].nelement() > 0:
+                    subset_env_ids_selected = env_ids_all[self.selected_env_ids_gripper_cmd == 1]
+
+                    # Step 1: apply force from 0 to force_target_gripper_cmd
+                    env_ids_apply_push_step1 = subset_env_ids_selected[self.episode_length_buf[self.selected_env_ids_gripper_cmd == 1] < (self.push_end_time_gripper_cmd[self.selected_env_ids_gripper_cmd == 1]).type(torch.int32)]
+                    if env_ids_apply_push_step1.nelement() > 0:
+                        push_duration_reshaped = self.push_duration_gripper_cmd[env_ids_apply_push_step1].unsqueeze(-1)
+                        
+                        self.current_Fxyz_gripper_cmd[env_ids_apply_push_step1, :3] = (self.force_target_gripper_cmd[env_ids_apply_push_step1, :3]/push_duration_reshaped)*(torch.clamp(self.episode_length_buf[env_ids_apply_push_step1].unsqueeze(-1) - (self.push_end_time_gripper_cmd[env_ids_apply_push_step1].unsqueeze(-1)-push_duration_reshaped), torch.zeros_like(push_duration_reshaped), push_duration_reshaped))
+                        
+                        self.commands[env_ids_apply_push_step1, INDEX_EE_FORCE_X] = self.current_Fxyz_gripper_cmd[env_ids_apply_push_step1, 0]
+                        self.commands[env_ids_apply_push_step1, INDEX_EE_FORCE_Y] = self.current_Fxyz_gripper_cmd[env_ids_apply_push_step1, 1]
+                        self.commands[env_ids_apply_push_step1, INDEX_EE_FORCE_Z] = self.current_Fxyz_gripper_cmd[env_ids_apply_push_step1, 2]
  
-                # Step 2: apply force from force_target_gripper_cmd back to 0
-                env_ids_apply_push_step2 = subset_env_ids_selected[self.episode_length_buf[self.selected_env_ids_gripper_cmd == 1] > (self.push_end_time_gripper_cmd[self.selected_env_ids_gripper_cmd == 1] + self.settling_time_force_gripper).type(torch.int32)]
-                if env_ids_apply_push_step2.nelement() > 0:
-                    push_duration_reshaped = self.push_duration_gripper_cmd[env_ids_apply_push_step2].unsqueeze(-1)
-                    self.current_Fxyz_gripper_cmd[env_ids_apply_push_step2, :3] = self.force_target_gripper_cmd[env_ids_apply_push_step2, :3] - (self.force_target_gripper_cmd[env_ids_apply_push_step2, :3]/push_duration_reshaped)*(torch.clamp(self.episode_length_buf[env_ids_apply_push_step2].unsqueeze(-1) - (self.push_end_time_gripper_cmd[env_ids_apply_push_step2].unsqueeze(-1)+self.settling_time_force_gripper), torch.zeros_like(push_duration_reshaped), push_duration_reshaped))
-                
-                    # World frame
-                    self.commands[env_ids_apply_push_step2, INDEX_EE_FORCE_X] = self.current_Fxyz_gripper_cmd[env_ids_apply_push_step2, 0] #torch.norm(self.current_Fxyz_gripper_cmd[env_ids_apply_push_step2, :2], dim=1)
-                    self.commands[env_ids_apply_push_step2, INDEX_EE_FORCE_Y] = self.current_Fxyz_gripper_cmd[env_ids_apply_push_step2, 1] #torch.atan2(self.current_Fxyz_gripper_cmd[env_ids_apply_push_step2, 1], self.current_Fxyz_gripper_cmd[env_ids_apply_push_step2, 0])
-                    self.commands[env_ids_apply_push_step2, INDEX_EE_FORCE_Z] = self.current_Fxyz_gripper_cmd[env_ids_apply_push_step2, 2]
+                    # Step 2: apply force from force_target_gripper_cmd back to 0
+                    env_ids_apply_push_step2 = subset_env_ids_selected[self.episode_length_buf[self.selected_env_ids_gripper_cmd == 1] > (self.push_end_time_gripper_cmd[self.selected_env_ids_gripper_cmd == 1] + self.settling_time_force_gripper).type(torch.int32)]
+                    if env_ids_apply_push_step2.nelement() > 0:
+                        push_duration_reshaped = self.push_duration_gripper_cmd[env_ids_apply_push_step2].unsqueeze(-1)
+                        self.current_Fxyz_gripper_cmd[env_ids_apply_push_step2, :3] = self.force_target_gripper_cmd[env_ids_apply_push_step2, :3] - (self.force_target_gripper_cmd[env_ids_apply_push_step2, :3]/push_duration_reshaped)*(torch.clamp(self.episode_length_buf[env_ids_apply_push_step2].unsqueeze(-1) - (self.push_end_time_gripper_cmd[env_ids_apply_push_step2].unsqueeze(-1)+self.settling_time_force_gripper), torch.zeros_like(push_duration_reshaped), push_duration_reshaped))
                     
-                # Reset the tensors
-                env_ids_to_reset = subset_env_ids_selected[self.episode_length_buf[self.selected_env_ids_gripper_cmd == 1] >= (self.push_end_time_gripper_cmd[self.selected_env_ids_gripper_cmd == 1] + self.settling_time_force_gripper + self.push_duration_gripper_cmd[self.selected_env_ids_gripper_cmd == 1]).type(torch.int32)]
-                if env_ids_to_reset.nelement() > 0:
-                    self.selected_env_ids_gripper_cmd[env_ids_to_reset] = 0
-                    self.force_target_gripper_cmd[env_ids_to_reset, :3] = 0.
-                    self.current_Fxyz_gripper_cmd[env_ids_to_reset, :3] = 0.
-                    self.push_end_time_gripper_cmd[env_ids_to_reset] = 0.
-                    self.push_duration_gripper_cmd[env_ids_to_reset] = 0.
-                    self.commands[env_ids_to_reset, INDEX_EE_FORCE_X] = 0.0
-                    self.commands[env_ids_to_reset, INDEX_EE_FORCE_Y] = 0.0
-                    self.commands[env_ids_to_reset, INDEX_EE_FORCE_Z] = 0.0
-                    self.push_interval_gripper_cmd[env_ids_to_reset, 0] = torch.randint(int(self.push_interval_gripper_cmd_min), int(self.push_interval_gripper_cmd_max), (len(env_ids_to_reset), 1), device=self.device)[:, 0]
-                    
-            self.selected_env_ids_gripper_cmd[self.freed_envs_gripper_cmd] = 0
-            self.force_target_gripper_cmd[self.freed_envs_gripper_cmd, :3] = 0.
-            self.current_Fxyz_gripper_cmd[self.freed_envs_gripper_cmd, :3] = 0.
-            self.push_end_time_gripper_cmd[self.freed_envs_gripper_cmd] = 0.
-            self.push_duration_gripper_cmd[self.freed_envs_gripper_cmd] = 0. 
-            self.commands[self.freed_envs_gripper_cmd, INDEX_EE_FORCE_X] = 0.0
-            self.commands[self.freed_envs_gripper_cmd, INDEX_EE_FORCE_Y] = 0.0
-            self.commands[self.freed_envs_gripper_cmd, INDEX_EE_FORCE_Z] = 0.0
+                        self.commands[env_ids_apply_push_step2, INDEX_EE_FORCE_X] = self.current_Fxyz_gripper_cmd[env_ids_apply_push_step2, 0]
+                        self.commands[env_ids_apply_push_step2, INDEX_EE_FORCE_Y] = self.current_Fxyz_gripper_cmd[env_ids_apply_push_step2, 1]
+                        self.commands[env_ids_apply_push_step2, INDEX_EE_FORCE_Z] = self.current_Fxyz_gripper_cmd[env_ids_apply_push_step2, 2]
+                        
+                    # Reset the tensors
+                    env_ids_to_reset = subset_env_ids_selected[self.episode_length_buf[self.selected_env_ids_gripper_cmd == 1] >= (self.push_end_time_gripper_cmd[self.selected_env_ids_gripper_cmd == 1] + self.settling_time_force_gripper + self.push_duration_gripper_cmd[self.selected_env_ids_gripper_cmd == 1]).type(torch.int32)]
+                    if env_ids_to_reset.nelement() > 0:
+                        self.selected_env_ids_gripper_cmd[env_ids_to_reset] = 0
+                        self.force_target_gripper_cmd[env_ids_to_reset, :3] = 0.
+                        self.current_Fxyz_gripper_cmd[env_ids_to_reset, :3] = 0.
+                        self.push_end_time_gripper_cmd[env_ids_to_reset] = 0.
+                        self.push_duration_gripper_cmd[env_ids_to_reset] = 0.
+                        self.commands[env_ids_to_reset, INDEX_EE_FORCE_X] = 0.0
+                        self.commands[env_ids_to_reset, INDEX_EE_FORCE_Y] = 0.0
+                        self.commands[env_ids_to_reset, INDEX_EE_FORCE_Z] = 0.0
+                        self.push_interval_gripper_cmd[env_ids_to_reset, 0] = torch.randint(int(self.push_interval_gripper_cmd_min), int(self.push_interval_gripper_cmd_max), (len(env_ids_to_reset), 1), device=self.device)[:, 0]
+                        
+                self.selected_env_ids_gripper_cmd[self.freed_envs_gripper_cmd] = 0
+                self.force_target_gripper_cmd[self.freed_envs_gripper_cmd, :3] = 0.
+                self.current_Fxyz_gripper_cmd[self.freed_envs_gripper_cmd, :3] = 0.
+                self.push_end_time_gripper_cmd[self.freed_envs_gripper_cmd] = 0.
+                self.push_duration_gripper_cmd[self.freed_envs_gripper_cmd] = 0. 
+                self.commands[self.freed_envs_gripper_cmd, INDEX_EE_FORCE_X] = 0.0
+                self.commands[self.freed_envs_gripper_cmd, INDEX_EE_FORCE_Y] = 0.0
+                self.commands[self.freed_envs_gripper_cmd, INDEX_EE_FORCE_Z] = 0.0
+            else:
+                self.selected_env_ids_gripper_cmd[:] = 0
+                self.freed_envs_gripper_cmd[:] = False
+                self.force_target_gripper_cmd[:, :3] = 0.
+                self.current_Fxyz_gripper_cmd[:, :3] = 0.
+                self.push_end_time_gripper_cmd[:] = 0.
+                self.push_duration_gripper_cmd[:] = 0.
+                self.commands[:, INDEX_EE_FORCE_X] = 0.0
+                self.commands[:, INDEX_EE_FORCE_Y] = 0.0
+                self.commands[:, INDEX_EE_FORCE_Z] = 0.0
 
 
             # ext force
@@ -1332,10 +1391,10 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
         noise_level = self.cfg.noise.noise_level
         noise_vec[:2] = noise_scales.gravity * noise_level
         noise_vec[2:5] = noise_scales.ang_vel * noise_level * self.obs_scales.ang_vel
-        noise_vec[5:5+self.num_actions] = noise_scales.dof_pos * noise_level * self.obs_scales.dof_pos
-        noise_vec[5+self.num_actions:5+self.num_actions*2] = noise_scales.dof_vel * noise_level * self.obs_scales.dof_vel
-        noise_vec[5+self.num_actions*2:5+self.num_actions*3] = 0. # previous actions
-        noise_vec[5+self.num_actions*3:] = 0. # commands
+        noise_vec[5:5+self.num_torques] = noise_scales.dof_pos * noise_level * self.obs_scales.dof_pos
+        noise_vec[5+self.num_torques:5+self.num_torques*2] = noise_scales.dof_vel * noise_level * self.obs_scales.dof_vel
+        noise_vec[5+self.num_torques*2:5+self.num_torques*3] = 0. # previous actions
+        noise_vec[5+self.num_torques*3:] = 0. # commands
 
         return noise_vec
 
@@ -1369,7 +1428,7 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
         self.base_yaw_euler = torch.cat([torch.zeros(self.num_envs, 2, device=self.device), base_yaw.view(-1, 1)], dim=1)
         self.base_yaw_quat = quat_from_euler_xyz(torch.tensor(0), torch.tensor(0), base_yaw)
 
-        self.arm_base_offset = torch.tensor([0.2, 0., 0.225], device=self.device, dtype=torch.float).repeat(self.num_envs, 1)
+        self.arm_base_offset = torch.tensor(self.cfg.arm.base_offset, device=self.device, dtype=torch.float).repeat(self.num_envs, 1)
         
         self.contact_forces = gymtorch.wrap_tensor(net_contact_forces).view(self.num_envs, -1, 3) # shape: num_envs, num_bodies, xyz axis
         self.rigid_state = gymtorch.wrap_tensor(rigid_body_state).view(self.num_envs, -1, 13)
@@ -1490,6 +1549,18 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
                 self.d_gains[i] = 0.
                 if self.cfg.control.control_type in ["P", "V"]:
                     print(f"PD gain of joint {name} were not defined, setting them to zero")
+        self.gripper_p_gains = torch.zeros(self.cfg.env.num_gripper_joints, dtype=torch.float, device=self.device, requires_grad=False)
+        self.gripper_d_gains = torch.zeros(self.cfg.env.num_gripper_joints, dtype=torch.float, device=self.device, requires_grad=False)
+        for i in range(self.cfg.env.num_gripper_joints):
+            name = self.dof_names[self.num_torques + i]
+            found = False
+            for dof_name in self.cfg.control.stiffness.keys():
+                if dof_name in name:
+                    self.gripper_p_gains[i] = self.cfg.control.stiffness[dof_name]
+                    self.gripper_d_gains[i] = self.cfg.control.damping[dof_name]
+                    found = True
+            if not found and self.cfg.control.control_type in ["P", "V"]:
+                print(f"PD gain of joint {name} were not defined, setting them to zero")
         self.default_dof_pos = self.default_dof_pos.unsqueeze(0)
         self.default_dof_pos_wo_gripper = self.default_dof_pos[:, :-self.cfg.env.num_gripper_joints]
         
@@ -1643,9 +1714,10 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
         self.dof_names = self.gym.get_asset_dof_names(robot_asset)
         self.dof_wo_gripper_names = self.dof_names[:-self.cfg.env.num_gripper_joints]
         self.gripper_idx = self.body_names_to_idx[self.cfg.asset.gripper_name]
-        self.robot_base_idx = [index for index, body_name in enumerate(body_names) if body_name == "base_link"][0]
+        self.robot_base_idx = self.body_names_to_idx[self.cfg.asset.base_name]
         self.num_bodies = len(body_names)
         self.num_dofs = len(self.dof_names)
+        self.mass_randomized_body_indices = [idx for idx in range(self.num_bodies) if idx not in {self.robot_base_idx, self.gripper_idx}][:self.num_torques]
         feet_names = [s for s in body_names if self.cfg.asset.foot_name in s]
         thigh_names = [s for s in body_names if self.cfg.asset.thigh_name in s]
         penalized_contact_names = []
@@ -1667,7 +1739,7 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
         self.envs = []
         self.env_frictions = torch.zeros(self.num_envs, 1, dtype=torch.float32, device=self.device)
 
-        self.mass_params_tensor = torch.zeros(self.num_envs, 22, dtype=torch.float, device=self.device, requires_grad=False)
+        self.mass_params_tensor = torch.zeros(self.num_envs, self.mass_param_dim, dtype=torch.float, device=self.device, requires_grad=False)
         
         for i in range(self.num_envs):
 
@@ -1712,8 +1784,8 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
 
         if self.cfg.domain_rand.randomize_motor:
             self.motor_strength = torch.cat([
-                    torch_rand_float(self.cfg.domain_rand.leg_motor_strength_range[0], self.cfg.domain_rand.leg_motor_strength_range[1], (self.num_envs, 12), device=self.device),
-                    torch_rand_float(self.cfg.domain_rand.arm_motor_strength_range[0], self.cfg.domain_rand.arm_motor_strength_range[1], (self.num_envs, 5), device=self.device)
+                    torch_rand_float(self.cfg.domain_rand.leg_motor_strength_range[0], self.cfg.domain_rand.leg_motor_strength_range[1], (self.num_envs, self.num_leg_dofs), device=self.device),
+                    torch_rand_float(self.cfg.domain_rand.arm_motor_strength_range[0], self.cfg.domain_rand.arm_motor_strength_range[1], (self.num_envs, self.num_arm_dofs), device=self.device)
                 ], dim=1)
         else:
             self.motor_strength = torch.ones(self.num_envs, self.num_torques, device=self.device)
@@ -1740,6 +1812,10 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
 
     def _parse_cfg(self, cfg):
         self.num_torques = self.cfg.env.num_torques
+        self.num_leg_dofs = self.cfg.env.num_leg_dofs
+        self.num_arm_dofs = self.num_torques - self.num_leg_dofs
+        self.arm_dof_slice = slice(self.num_leg_dofs, self.num_torques)
+        self.mass_param_dim = 5 + self.num_torques
         self.dt = self.cfg.control.decimation * self.sim_params.dt
         self.obs_scales = self.cfg.normalization.obs_scales
         self.reward_scales = class_to_dict(self.cfg.rewards.scales)
@@ -1934,7 +2010,7 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
     
     def _reward_torques_arm(self):
         # Penalize torques
-        return torch.sum(torch.square(self.torques)[:, 12:17], dim=1)
+        return torch.sum(torch.square(self.torques)[:, self.arm_dof_slice], dim=1)
 
     def _reward_dof_vel(self):
         # Penalize dof velocities
@@ -1942,7 +2018,7 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
 
     def _reward_dof_vel_arm(self):
         # Penalize dof velocities
-        return torch.sum(torch.square(self.dof_vel)[:, 12:17], dim=1)
+        return torch.sum(torch.square(self.dof_vel)[:, self.arm_dof_slice], dim=1)
         
     def _reward_energy_square(self):
         energy = torch.sum(torch.square(self.torques * self.dof_vel)[:, :12], dim=1)
@@ -1956,7 +2032,7 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
         return energy
     
     def _reward_energy_square_arm(self):
-        energy = torch.sum(torch.square(self.torques * self.dof_vel)[:, 12:17], dim=1)
+        energy = torch.sum(torch.square(self.torques * self.dof_vel)[:, self.arm_dof_slice], dim=1)
         return energy
     
     def _reward_dof_acc(self):
@@ -1965,7 +2041,7 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
     
     def _reward_dof_acc_arm(self):
         # Penalize dof accelerations
-        return torch.sum(torch.square((self.last_dof_vel - self.dof_vel)[:, 12:17] / self.dt), dim=1)
+        return torch.sum(torch.square((self.last_dof_vel - self.dof_vel)[:, self.arm_dof_slice] / self.dt), dim=1)
     
     def _reward_action_rate(self):
         # Penalize changes in actions
@@ -1973,7 +2049,7 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
     
     def _reward_action_rate_arm(self):
         # Penalize changes in actions
-        return torch.sum(torch.square(self.last_actions - self.actions)[:, 12:17], dim=1)
+        return torch.sum(torch.square(self.last_actions - self.actions)[:, self.arm_dof_slice], dim=1)
     
     def _reward_collision(self):
         # Penalize collisions on selected bodies
@@ -1988,7 +2064,7 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
         # Penalize dof positions too close to the limit
         out_of_limits = -(self.dof_pos - self.dof_pos_limits[:, 0]).clip(max=0.) # lower limit
         out_of_limits += (self.dof_pos - self.dof_pos_limits[:, 1]).clip(min=0.)
-        return torch.sum(out_of_limits[:, :17], dim=1)
+        return torch.sum(out_of_limits[:, :self.num_torques], dim=1)
 
     def _reward_dof_vel_limits(self):
         # Penalize dof velocities too close to the limit
@@ -2005,7 +2081,7 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
     
     def _reward_torque_limits_arm(self):
         # penalize torques too close to the limit
-        return torch.sum((torch.abs(self.torques[:,12:17]) - self.torque_limits[12:17] * self.cfg.rewards.soft_torque_limit).clip(min=0.), dim=1)
+        return torch.sum((torch.abs(self.torques[:, self.arm_dof_slice]) - self.torque_limits[self.arm_dof_slice] * self.cfg.rewards.soft_torque_limit).clip(min=0.), dim=1)
 
     
     def _reward_tracking_lin_vel(self):
@@ -2235,7 +2311,7 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
         return rew
     
     def _reward_delta_torques_arm(self):
-        rew = torch.sum(torch.square(self.torques - self.last_torques)[:, 12:17], dim=1)
+        rew = torch.sum(torch.square(self.torques - self.last_torques)[:, self.arm_dof_slice], dim=1)
         return rew
     
     def _reward_action_smoothness(self):

@@ -231,7 +231,7 @@ class OnPolicyRunner:
                        f"""{'ETA:':>{pad}} {self.tot_time / (locs['it'] + 1) * (
                                locs['num_learning_iterations'] - locs['it']):.1f}s\n""")
         print(log_string)
-        self.total_reward = statistics.mean(locs['rewbuffer'])
+        self.total_reward = statistics.mean(locs['rewbuffer']) if len(locs['rewbuffer']) > 0 else 0.0
 
     def save(self, path, infos=None):
         torch.save({
