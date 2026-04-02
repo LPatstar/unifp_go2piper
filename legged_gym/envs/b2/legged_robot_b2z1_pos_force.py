@@ -65,6 +65,9 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
         self.debug_curve = False
         self.enable_gripper_cmd_force = True
         self.enable_play_immediate_gripper_cmd_force = False
+        self.key_command_mode = getattr(self.cfg.env, "key_command_mode", False)
+        self.enable_numeric_viewer_hotkeys = not self.key_command_mode
+        self.enable_random_force_events = not self.key_command_mode
         if self.debug_curve:
             self.FL_joint_index = 2
             self.FR_joint_index = 5
@@ -128,7 +131,7 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
                 self.gym.fetch_results(self.sim, True)
 
             enable_play_cmd_force = self.play and self.enable_play_immediate_gripper_cmd_force
-            if self.global_steps > self.cfg.commands.force_start_step * 24 or enable_play_cmd_force:
+            if self.enable_random_force_events and (self.global_steps > self.cfg.commands.force_start_step * 24 or enable_play_cmd_force):
                 # push gripper
                 self._push_gripper(torch.arange(self.num_envs, device=self.device))      
                 # push robot base 
@@ -272,6 +275,12 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
         self.commands[env_ids, INDEX_BASE_FORCE_X] = 0.0
         self.commands[env_ids, INDEX_BASE_FORCE_Y] = 0.0
         self.commands[env_ids, INDEX_BASE_FORCE_Z] = 0.0
+
+        if self.key_command_mode:
+            reset_local_cart = sphere2cart(self.init_start_ee_sphere).repeat(len(env_ids), 1)
+            self._set_key_command_ee_goal_local_cart(env_ids, reset_local_cart)
+            self.current_Fxyz_gripper_cmd[env_ids, :3] = 0.
+            self.current_Fxyz_base_cmd[env_ids, :3] = 0.
         
 
         # Reset push gripper 
@@ -996,6 +1005,9 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
         return collision_mask | underground_mask
 
     def update_curr_ee_goal(self):
+        if self.key_command_mode:
+            self._update_key_command_ee_goal()
+
         if not self.cfg.env.teleop_mode:
             t = torch.clip(self.goal_timer / self.traj_timesteps, 0, 1)
             self.curr_ee_goal_sphere[:] = torch.lerp(self.ee_start_sphere, self.ee_goal_sphere, t[:, None])
@@ -1025,6 +1037,44 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
         center = torch.cat([self.root_states[:, :2], torch.zeros(self.num_envs, 1, device=self.device)], dim=1)
         center = center + quat_apply(self.base_yaw_quat, self.ee_goal_center_offset)
         return center
+
+    def _update_key_command_ee_goal(self):
+        if not torch.all(self.key_command_initialized):
+            self.key_command_ee_local_cart[:] = self.curr_ee_goal_cart[:]
+            self.key_command_initialized[:] = True
+
+        self.curr_ee_goal_cart[:] = self.key_command_ee_local_cart
+        self.curr_ee_goal_sphere[:] = cart2sphere(self.curr_ee_goal_cart)
+        self.ee_start_sphere[:] = self.curr_ee_goal_sphere
+        self.ee_goal_sphere[:] = self.curr_ee_goal_sphere
+        self.goal_timer[:] = 0
+        self.commands[:, INDEX_EE_POS_RADIUS_CMD:(INDEX_EE_POS_YAW_CMD+1)] = self.curr_ee_goal_sphere.view(self.num_envs, 3)
+
+    def _set_key_command_ee_goal_local_cart(self, env_ids, target_local_cart):
+        if len(env_ids) == 0:
+            return
+
+        target_sphere = cart2sphere(target_local_cart)
+        target_sphere[:, 0] = torch.clamp(target_sphere[:, 0], self.goal_ee_ranges["pos_l"][0], self.goal_ee_ranges["pos_l"][1])
+        target_sphere[:, 1] = torch.clamp(target_sphere[:, 1], self.goal_ee_ranges["pos_p"][0], self.goal_ee_ranges["pos_p"][1])
+        target_sphere[:, 2] = torch.clamp(target_sphere[:, 2], self.goal_ee_ranges["pos_y"][0], self.goal_ee_ranges["pos_y"][1])
+        self.key_command_ee_local_cart[env_ids] = sphere2cart(target_sphere)
+        self.key_command_initialized[env_ids] = True
+
+    def _adjust_key_command_ee_goal_local_cart(self, delta_local_cart):
+        env_ids = torch.arange(self.num_envs, device=self.device)
+        target_local_cart = self.key_command_ee_local_cart[env_ids] + delta_local_cart
+        self._set_key_command_ee_goal_local_cart(env_ids, target_local_cart)
+
+    def _get_viewer_key_constant(self, *names):
+        for name in names:
+            if hasattr(gymapi, name):
+                return getattr(gymapi, name)
+        return None
+
+    def _subscribe_key_command_event(self, key, action):
+        if key is not None:
+            self.gym.subscribe_viewer_keyboard_event(self.viewer, key, action)
     
     def _reset_dofs(self, env_ids):
         """ Resets DOF position and velocities of selected environmments
@@ -1616,6 +1666,13 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
                                    requires_grad=False)
         self.forces_local = torch.zeros(self.num_envs, self.num_bodies, 3, dtype=torch.float, device=self.device,
                                    requires_grad=False)
+        self.key_lin_vel_step = 0.05
+        self.key_ang_vel_step = 0.08
+        self.key_ee_cart_step = 0.02
+        self.key_ee_force_step = 5.0
+        self.key_base_force_step = 5.0
+        self.key_command_ee_local_cart = torch.zeros(self.num_envs, 3, dtype=torch.float, device=self.device, requires_grad=False)
+        self.key_command_initialized = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device, requires_grad=False)
 
         self.global_steps = 0
 
@@ -1916,7 +1973,26 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
  
     def subscribe_viewer_keyboard_events(self):
         super().subscribe_viewer_keyboard_events()
-        if self.cfg.env.teleop_mode:
+        if self.key_command_mode:
+            self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_W, "key_forward")
+            self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_S, "key_backward")
+            self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_A, "key_left")
+            self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_D, "key_right")
+            self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_Q, "key_yaw_left")
+            self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_E, "key_yaw_right")
+            self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_J, "key_ee_force_dec")
+            self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_K, "key_ee_force_inc")
+            self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_I, "key_base_force_inc")
+            self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_O, "key_base_force_dec")
+            self._subscribe_key_command_event(self._get_viewer_key_constant("KEY_KP_8", "KEY_NUMPAD_8", "KEY_8"), "key_ee_x_inc")
+            self._subscribe_key_command_event(self._get_viewer_key_constant("KEY_KP_2", "KEY_NUMPAD_2", "KEY_2"), "key_ee_x_dec")
+            self._subscribe_key_command_event(self._get_viewer_key_constant("KEY_KP_4", "KEY_NUMPAD_4", "KEY_4"), "key_ee_y_inc")
+            self._subscribe_key_command_event(self._get_viewer_key_constant("KEY_KP_6", "KEY_NUMPAD_6", "KEY_6"), "key_ee_y_dec")
+            self._subscribe_key_command_event(self._get_viewer_key_constant("KEY_KP_9", "KEY_NUMPAD_9", "KEY_9"), "key_ee_z_inc")
+            self._subscribe_key_command_event(self._get_viewer_key_constant("KEY_KP_3", "KEY_NUMPAD_3", "KEY_3"), "key_ee_z_dec")
+            self._subscribe_key_command_event(self._get_viewer_key_constant("KEY_KP_5", "KEY_NUMPAD_5", "KEY_5"), "key_ee_reset_home")
+            self._subscribe_key_command_event(self._get_viewer_key_constant("KEY_KP_0", "KEY_NUMPAD_0", "KEY_0"), "key_ee_set_current")
+        elif self.cfg.env.teleop_mode:
             self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_W, "forward")
             self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_S, "reverse")
             self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_Z, "left")
@@ -1932,6 +2008,57 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
         super().handle_viewer_action_event(evt)
 
         if evt.value <= 0:
+            return
+
+        if self.key_command_mode:
+            if evt.action == "key_forward":
+                self.commands[:, 0] = torch.clamp(self.commands[:, 0] + self.key_lin_vel_step, self.command_ranges["lin_vel_x"][0], self.command_ranges["lin_vel_x"][1])
+            elif evt.action == "key_backward":
+                self.commands[:, 0] = torch.clamp(self.commands[:, 0] - self.key_lin_vel_step, self.command_ranges["lin_vel_x"][0], self.command_ranges["lin_vel_x"][1])
+            elif evt.action == "key_left":
+                self.commands[:, 1] = torch.clamp(self.commands[:, 1] + self.key_lin_vel_step, self.command_ranges["lin_vel_y"][0], self.command_ranges["lin_vel_y"][1])
+            elif evt.action == "key_right":
+                self.commands[:, 1] = torch.clamp(self.commands[:, 1] - self.key_lin_vel_step, self.command_ranges["lin_vel_y"][0], self.command_ranges["lin_vel_y"][1])
+            elif evt.action == "key_yaw_left":
+                self.commands[:, 2] = torch.clamp(self.commands[:, 2] + self.key_ang_vel_step, self.command_ranges["ang_vel_yaw"][0], self.command_ranges["ang_vel_yaw"][1])
+            elif evt.action == "key_yaw_right":
+                self.commands[:, 2] = torch.clamp(self.commands[:, 2] - self.key_ang_vel_step, self.command_ranges["ang_vel_yaw"][0], self.command_ranges["ang_vel_yaw"][1])
+            elif evt.action == "key_ee_x_inc":
+                delta = torch.tensor([self.key_ee_cart_step, 0.0, 0.0], device=self.device).repeat(self.num_envs, 1)
+                self._adjust_key_command_ee_goal_local_cart(delta)
+            elif evt.action == "key_ee_x_dec":
+                delta = torch.tensor([-self.key_ee_cart_step, 0.0, 0.0], device=self.device).repeat(self.num_envs, 1)
+                self._adjust_key_command_ee_goal_local_cart(delta)
+            elif evt.action == "key_ee_y_inc":
+                delta = torch.tensor([0.0, self.key_ee_cart_step, 0.0], device=self.device).repeat(self.num_envs, 1)
+                self._adjust_key_command_ee_goal_local_cart(delta)
+            elif evt.action == "key_ee_y_dec":
+                delta = torch.tensor([0.0, -self.key_ee_cart_step, 0.0], device=self.device).repeat(self.num_envs, 1)
+                self._adjust_key_command_ee_goal_local_cart(delta)
+            elif evt.action == "key_ee_z_inc":
+                delta = torch.tensor([0.0, 0.0, self.key_ee_cart_step], device=self.device).repeat(self.num_envs, 1)
+                self._adjust_key_command_ee_goal_local_cart(delta)
+            elif evt.action == "key_ee_z_dec":
+                delta = torch.tensor([0.0, 0.0, -self.key_ee_cart_step], device=self.device).repeat(self.num_envs, 1)
+                self._adjust_key_command_ee_goal_local_cart(delta)
+            elif evt.action == "key_ee_reset_home":
+                reset_local_cart = sphere2cart(self.init_start_ee_sphere).repeat(self.num_envs, 1)
+                self._set_key_command_ee_goal_local_cart(torch.arange(self.num_envs, device=self.device), reset_local_cart)
+            elif evt.action == "key_ee_set_current":
+                ee_local_cart = quat_rotate_inverse(self.base_yaw_quat, self.ee_pos - self.get_ee_goal_spherical_center())
+                self._set_key_command_ee_goal_local_cart(torch.arange(self.num_envs, device=self.device), ee_local_cart)
+            elif evt.action == "key_ee_force_dec":
+                self.current_Fxyz_gripper_cmd[:, 0] = torch.clamp(self.current_Fxyz_gripper_cmd[:, 0] - self.key_ee_force_step, self.cfg.commands.max_push_force_xyz_gripper_cmd[0], self.cfg.commands.max_push_force_xyz_gripper_cmd[1])
+                self.commands[:, INDEX_EE_FORCE_X] = self.current_Fxyz_gripper_cmd[:, 0]
+            elif evt.action == "key_ee_force_inc":
+                self.current_Fxyz_gripper_cmd[:, 0] = torch.clamp(self.current_Fxyz_gripper_cmd[:, 0] + self.key_ee_force_step, self.cfg.commands.max_push_force_xyz_gripper_cmd[0], self.cfg.commands.max_push_force_xyz_gripper_cmd[1])
+                self.commands[:, INDEX_EE_FORCE_X] = self.current_Fxyz_gripper_cmd[:, 0]
+            elif evt.action == "key_base_force_inc":
+                self.current_Fxyz_base_cmd[:, 0] = torch.clamp(self.current_Fxyz_base_cmd[:, 0] + self.key_base_force_step, self.cfg.commands.max_push_force_xyz_base_cmd[0], self.cfg.commands.max_push_force_xyz_base_cmd[1])
+                self.commands[:, INDEX_BASE_FORCE_X] = self.current_Fxyz_base_cmd[:, 0]
+            elif evt.action == "key_base_force_dec":
+                self.current_Fxyz_base_cmd[:, 0] = torch.clamp(self.current_Fxyz_base_cmd[:, 0] - self.key_base_force_step, self.cfg.commands.max_push_force_xyz_base_cmd[0], self.cfg.commands.max_push_force_xyz_base_cmd[1])
+                self.commands[:, INDEX_BASE_FORCE_X] = self.current_Fxyz_base_cmd[:, 0]
             return
         
         if evt.action == "stop_x":

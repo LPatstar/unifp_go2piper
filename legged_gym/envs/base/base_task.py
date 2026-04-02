@@ -82,9 +82,10 @@ class BaseTask():
             self.viewer, gymapi.KEY_V, "toggle_viewer_sync")
         self.gym.subscribe_viewer_keyboard_event(
             self.viewer, gymapi.KEY_F, "free_cam")
-        for i in range(9):
-            self.gym.subscribe_viewer_keyboard_event(
-            self.viewer, getattr(gymapi, "KEY_"+str(i)), "lookat"+str(i))
+        if getattr(self, "enable_numeric_viewer_hotkeys", True):
+            for i in range(9):
+                self.gym.subscribe_viewer_keyboard_event(
+                    self.viewer, getattr(gymapi, "KEY_"+str(i)), "lookat"+str(i))
         self.gym.subscribe_viewer_keyboard_event(
             self.viewer, gymapi.KEY_LEFT_BRACKET, "prev_id")
         self.gym.subscribe_viewer_keyboard_event(

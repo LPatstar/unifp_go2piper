@@ -77,33 +77,35 @@ class Go2PiperPosForceRoughCfg(B2Z1PosForceRoughCfg):
         # externally applied disturbances.
         max_push_force_xyz_gripper_cmd = [-30, 30]
         max_push_force_xyz_gripper_ext = [-30, 30]
+        gripper_force_kp_range = [200., 200.]
+        base_force_kd_range = [30.0, 30.0]
 
     class control(B2Z1PosForceRoughCfg.control):
         stiffness = {
-            "hip": 300.0,
-            "thigh": 300.0,
-            "calf": 500.0,
-            "piper_joint1": 90.0,
-            "piper_joint2": 90.0,
-            "piper_joint3": 70.0,
-            "piper_joint4": 60.0,
-            "piper_joint5": 40.0,
-            "piper_joint6": 40.0,
-            "piper_joint7": 40.0,
-            "piper_joint8": 40.0,
+            "hip": 40.0,
+            "thigh": 40.0,
+            "calf": 40.0,
+            "piper_joint1": 80.0,
+            "piper_joint2": 80.0,
+            "piper_joint3": 80.0,
+            "piper_joint4": 80.0,
+            "piper_joint5": 80.0,
+            "piper_joint6": 80.0,
+            "piper_joint7": 400.0,
+            "piper_joint8": 400.0,
         }
         damping = {
-            "hip": 7.5,
-            "thigh": 7.5,
-            "calf": 12.5,
-            "piper_joint1": 2.5,
-            "piper_joint2": 2.5,
-            "piper_joint3": 2.0,
-            "piper_joint4": 1.5,
-            "piper_joint5": 1.0,
-            "piper_joint6": 1.0,
-            "piper_joint7": 1.0,
-            "piper_joint8": 1.0,
+            "hip": 1.0,
+            "thigh": 1.0,
+            "calf": 1.0,
+            "piper_joint1": 5.0,
+            "piper_joint2": 5.0,
+            "piper_joint3": 5.0,
+            "piper_joint4": 5.0,
+            "piper_joint5": 5.0,
+            "piper_joint6": 5.0,
+            "piper_joint7": 5.0,
+            "piper_joint8": 5.0,
         }
 
     class arm(B2Z1PosForceRoughCfg.arm):
