@@ -1980,6 +1980,8 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
             self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_D, "key_right")
             self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_Q, "key_yaw_left")
             self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_E, "key_yaw_right")
+            self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_R, "key_reset_commands")
+            self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_N, "key_reset_forces")
             self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_J, "key_ee_force_dec")
             self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_K, "key_ee_force_inc")
             self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_I, "key_base_force_inc")
@@ -2023,6 +2025,13 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
                 self.commands[:, 2] = torch.clamp(self.commands[:, 2] + self.key_ang_vel_step, self.command_ranges["ang_vel_yaw"][0], self.command_ranges["ang_vel_yaw"][1])
             elif evt.action == "key_yaw_right":
                 self.commands[:, 2] = torch.clamp(self.commands[:, 2] - self.key_ang_vel_step, self.command_ranges["ang_vel_yaw"][0], self.command_ranges["ang_vel_yaw"][1])
+            elif evt.action == "key_reset_commands":
+                self.commands[:, 0:3] = 0.0
+            elif evt.action == "key_reset_forces":
+                self.current_Fxyz_gripper_cmd[:, :3] = 0.0
+                self.current_Fxyz_base_cmd[:, :3] = 0.0
+                self.commands[:, INDEX_EE_FORCE_X:INDEX_EE_FORCE_Z + 1] = 0.0
+                self.commands[:, INDEX_BASE_FORCE_X:INDEX_BASE_FORCE_Z + 1] = 0.0
             elif evt.action == "key_ee_x_inc":
                 delta = torch.tensor([self.key_ee_cart_step, 0.0, 0.0], device=self.device).repeat(self.num_envs, 1)
                 self._adjust_key_command_ee_goal_local_cart(delta)
