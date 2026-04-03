@@ -154,9 +154,9 @@ Useful options:
 Outputs:
 
 - `summary.json`
-  Structured metrics for each evaluation case, estimator quality, runtime quality metrics, and the final overall score.
+  Structured metrics for each evaluation case, estimator quality, runtime quality metrics, the final overall score, and the resolved model run/checkpoint that was actually evaluated.
 - `summary.md`
-  Human-readable report with the main scores and raw physical metrics.
+  Human-readable report with the main scores, raw physical metrics, and the resolved model run/checkpoint metadata.
 
 For a detailed explanation of the benchmark design and every metric, see [GO2_PIPER_EVAL_METRICS.md](GO2_PIPER_EVAL_METRICS.md).
 

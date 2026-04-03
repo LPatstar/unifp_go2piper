@@ -26,7 +26,7 @@ from legged_gym.envs.b2.legged_robot_b2z1_pos_force import (
     INDEX_EE_FORCE_Z,
 )
 from legged_gym.utils import task_registry
-from legged_gym.utils.helpers import class_to_dict
+from legged_gym.utils.helpers import class_to_dict, get_load_path
 from legged_gym.utils.isaacgym_utils import sphere2cart
 
 
@@ -838,14 +838,47 @@ def output_paths(args, train_cfg):
     }
 
 
+def resolve_model_metadata(args, train_cfg):
+    log_root = os.path.join(LEGGED_GYM_ROOT_DIR, "logs", train_cfg.runner.experiment_name)
+    resolved_model_path = get_load_path(
+        log_root,
+        load_run=train_cfg.runner.load_run,
+        checkpoint=train_cfg.runner.checkpoint,
+    )
+    resolved_run_dir = os.path.dirname(resolved_model_path)
+    resolved_run_name = os.path.basename(resolved_run_dir)
+    resolved_model_file = os.path.basename(resolved_model_path)
+
+    resolved_checkpoint = -1
+    if resolved_model_file.startswith("model_") and resolved_model_file.endswith(".pt"):
+        checkpoint_str = resolved_model_file[len("model_"):-len(".pt")]
+        try:
+            resolved_checkpoint = int(checkpoint_str)
+        except ValueError:
+            resolved_checkpoint = checkpoint_str
+
+    return {
+        "requested_load_run": args.load_run if args.load_run is not None else train_cfg.runner.load_run,
+        "requested_checkpoint": args.checkpoint if args.checkpoint is not None else train_cfg.runner.checkpoint,
+        "resolved_run_name": resolved_run_name,
+        "resolved_checkpoint": resolved_checkpoint,
+        "resolved_model_file": resolved_model_file,
+        "resolved_model_path": resolved_model_path,
+    }
+
+
 def build_markdown_report(metadata, case_summaries, estimator_summary, runtime_quality, overall_summary):
     lines = [
         "# Go2+Piper Automated Evaluation Report",
         "",
         "## Metadata",
         f"- Task: `{metadata['task']}`",
-        f"- Load run: `{metadata['load_run']}`",
-        f"- Checkpoint: `{metadata['checkpoint']}`",
+        f"- Requested load run: `{metadata['requested_load_run']}`",
+        f"- Requested checkpoint: `{metadata['requested_checkpoint']}`",
+        f"- Resolved run: `{metadata['resolved_run_name']}`",
+        f"- Resolved checkpoint: `{metadata['resolved_checkpoint']}`",
+        f"- Model file: `{metadata['resolved_model_file']}`",
+        f"- Model path: `{metadata['resolved_model_path']}`",
         f"- Num envs: `{metadata['num_envs']}`",
         f"- Eval repeats: `{metadata['eval_repeats']}`",
         f"- Dt: `{format_float(metadata['dt'], 4)}` s",
@@ -1067,14 +1100,13 @@ def run_evaluation(args):
 
     metadata = {
         "task": args.task,
-        "load_run": args.load_run if args.load_run is not None else "-1",
-        "checkpoint": args.checkpoint if args.checkpoint is not None else -1,
         "num_envs": env.num_envs,
         "eval_repeats": args.eval_repeats,
         "dt": env.dt,
         "terrain": "flat" if args.flat_terrain else "default_eval",
         "env_cfg": class_to_dict(env_cfg),
     }
+    metadata.update(resolve_model_metadata(args, train_cfg))
     output_files = output_paths(args, train_cfg)
 
     result_payload = {

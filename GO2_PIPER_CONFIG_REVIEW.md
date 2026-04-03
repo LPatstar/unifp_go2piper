@@ -1,38 +1,172 @@
 # Go2 + Piper Config Review Checklist
 
-这份清单用于记录：
+这份清单用于记录两类东西：
 
-- `go2_piper_pos_force_config.py` 当前已经覆盖了哪些配置
-- 哪些参数仍然继承自 `b2z1_pos_force_config.py`
-- 这些“还没改”的参数里，哪些会因为 `Go2` 体型更小、`Piper` 机械臂不同，而值得优先重新评估
+- 哪些关键配置已经从 `b2z1` 改到了 `go2_piper`，但很可能还要继续调
+- 哪些配置目前仍然继承自 `b2z1`，还没有专门按 `Go2 + Piper` 复查
 
-## 当前已经覆盖的配置
+文件主入口：
 
-文件: [legged_gym/envs/go2/go2_piper_pos_force_config.py](/home/robodog/loco-manipulation/UniFP/legged_gym/envs/go2/go2_piper_pos_force_config.py)
+- [go2_piper_pos_force_config.py](/home/robodog/loco-manipulation/UniFP/legged_gym/envs/go2/go2_piper_pos_force_config.py)
 
-目前 `Go2PiperPosForceRoughCfg` 已经显式覆盖了这些模块：
+上游参考：
 
-- `goal_ee`
-- `init_state`
-- `env`
-- `commands`
-  - 目前只改了 `gripper` 力范围
-- `control`
-- `arm`
-- `asset`
-- `viewer`
-- `rewards`
-  - 目前只改了 `base_height_target`
+- [b2z1_pos_force_config.py](/home/robodog/loco-manipulation/UniFP/legged_gym/envs/b2/b2z1_pos_force_config.py)
 
-因此，下面列出的参数如果没有在 `go2_piper_pos_force_config.py` 里重新定义，就仍然沿用 `b2z1_pos_force_config.py` 的值。
+## 一、已经改过，但建议继续调
 
-## 优先复查
+这部分不是“完全没动过”的 inherited 参数，而是已经针对 Go2+Piper 做过一轮修改，但从现在的训练/评测目标来看，仍然值得继续调试。
 
-### 1. Base 质量与质心随机化
+### 1. EE 目标采样空间与碰撞约束
 
-来源:
+来源：
 
-- [legged_gym/envs/b2/b2z1_pos_force_config.py:74](/home/robodog/loco-manipulation/UniFP/legged_gym/envs/b2/b2z1_pos_force_config.py#L74)
+- [go2_piper_pos_force_config.py:9](/home/robodog/loco-manipulation/UniFP/legged_gym/envs/go2/go2_piper_pos_force_config.py#L9)
+- [b2z1_pos_force_config.py:6](/home/robodog/loco-manipulation/UniFP/legged_gym/envs/b2/b2z1_pos_force_config.py#L6)
+
+相关参数：
+
+- `goal_ee.collision_upper_limits`
+- `goal_ee.collision_lower_limits`
+- `goal_ee.underground_limit`
+- `goal_ee.arm_induced_pitch`
+- `goal_ee.sphere_center.x_offset / y_offset / z_invariant_offset`
+- `goal_ee.ranges.init_pos_start / init_pos_end`
+- `goal_ee.ranges.pos_l / pos_p / pos_y`
+- `goal_ee.ranges.delta_orn_r / delta_orn_p / delta_orn_y`
+
+为什么值得继续调：
+
+- 这部分你已经从 B2 改成了 Go2+Piper 版本，但它仍然直接决定训练时目标分布
+- 如果目标多数落在“纯手臂就能解决”的区域，策略就不太会学 whole-body reaching
+- 如果目标空间过大、过高或过偏，又会让 reach 精度和成功率明显下降
+- 它还要和红色 collision box、球心 `sphere_center`、以及实际 arm base 几何关系匹配
+
+相对 B2 现在改了什么：
+
+- 球心前后位置：`x_offset`
+  - B2: `0.2`
+  - Go2: `-0.03`
+- 球心高度：`z_invariant_offset`
+  - B2: `0.8`
+  - Go2: `0.48`
+- 半径范围：`pos_l`
+  - B2: `[0.35, 0.95]`
+  - Go2: `[0.30, 0.72]`
+- pitch 范围：`pos_p`
+  - B2: `[-2π/5, 2π/5]`
+  - Go2: `[-π/2.7, π/2.7]`
+- yaw 范围：`pos_y`
+  - 两者当前都还是 `[-3π/5, 3π/5]`
+- 初始目标：
+  - B2: `init_pos_start=[0.66, π/4, 0]`, `init_pos_end=[0.66, 0, 0]`
+  - Go2: `init_pos_start=[0.42, π/8, 0]`, `init_pos_end=[0.42, 0, 0]`
+- 姿态扰动范围：
+  - B2: `delta_orn_r/p/y = [-0.5, 0.5]`
+  - Go2: `delta_orn_r/p/y = [-0.35, 0.35]`
+- arm induced pitch：
+  - B2: `0.38`
+  - Go2: `0.12`
+- collision box：
+  - B2 更大、更偏前、更低
+  - Go2 现在整体明显收紧，且跟小机体更匹配
+
+建议重点观察：
+
+- `position_only` 的 EE RMSE 是否仍偏大
+- 策略是否明显不愿意用身体去辅助 reach
+- 某些采样点是否经常接近 collision box 边界
+
+### 2. EE / Base 力相关范围与补偿增益
+
+来源：
+
+- [go2_piper_pos_force_config.py:71](/home/robodog/loco-manipulation/UniFP/legged_gym/envs/go2/go2_piper_pos_force_config.py#L71)
+- [b2z1_pos_force_config.py:142](/home/robodog/loco-manipulation/UniFP/legged_gym/envs/b2/b2z1_pos_force_config.py#L142)
+
+相关参数：
+
+- `commands.max_push_force_xyz_gripper_cmd`
+- `commands.max_push_force_xyz_gripper_ext`
+- `commands.gripper_force_kp_range`
+- `commands.base_force_kd_range`
+
+为什么值得继续调：
+
+- 这部分你已经做过 Go2+Piper 一轮缩放
+- 但它们会直接影响绿色/蓝色力箭头的量级、补偿偏移幅度和 base velocity compensation 的强弱
+- 现在 `base_disturbance` 评测偏弱，说明这部分很可能还没到位
+
+当前相对 B2 的主要变化：
+
+- `gripper force range`
+  - B2: `[-60, 60]`
+  - Go2: `[-30, 30]`
+- `base_force_kd_range`
+  - B2: `[200, 200]`
+  - Go2: `[30, 30]`
+- `gripper_force_kp_range`
+  - 当前仍保留 `[200, 200]`
+
+### 3. 本体与机械臂 PD 增益
+
+来源：
+
+- [go2_piper_pos_force_config.py:80](/home/robodog/loco-manipulation/UniFP/legged_gym/envs/go2/go2_piper_pos_force_config.py#L80)
+
+相关参数：
+
+- `control.stiffness`
+- `control.damping`
+
+为什么值得继续调：
+
+- 这部分已经明显从 B2+Z1 改成了 Go2+Piper
+- 但它仍然会强烈影响 reach 精度、动作硬度、whole-body 协调和仿真稳定性
+- 如果后面出现“够不准”“动作发僵”“手臂抖动”“身体不愿意协同”，这里通常都值得再回头看
+
+### 4. Arm 安装偏移与初始 EE 参考位
+
+来源：
+
+- [go2_piper_pos_force_config.py:108](/home/robodog/loco-manipulation/UniFP/legged_gym/envs/go2/go2_piper_pos_force_config.py#L108)
+
+相关参数：
+
+- `arm.base_offset`
+- `arm.init_target_ee_base`
+- `arm.grasp_offset`
+
+为什么值得继续调：
+
+- 这部分虽然已经改成 Piper 的几何关系
+- 但它和 `goal_ee.sphere_center`、初始化姿态、目标分布是一整套耦合的
+- 如果以后发现初始 pose 不自然、reach 常偏某一侧、或者 keyplay 下 home pose 不顺手，这里值得一起看
+
+### 5. Base 高度目标
+
+来源：
+
+- [go2_piper_pos_force_config.py:127](/home/robodog/loco-manipulation/UniFP/legged_gym/envs/go2/go2_piper_pos_force_config.py#L127)
+
+相关参数：
+
+- `rewards.base_height_target = 0.35`
+
+为什么值得继续调：
+
+- 你已经从 B2 的高度目标改到了 Go2
+- 但如果 whole-body reach 时身体仍然过保守，或者站姿显得别扭，它仍然可能要配合 `rewards.scales.base_height` 一起再调
+
+## 二、目前还没专门按 Go2+Piper 复查，仍继承自 B2
+
+这部分是更典型的“尚未调试、仍然继承 B2”的 inherited 参数。
+
+### 6. Base 质量与质心随机化
+
+来源：
+
+- [b2z1_pos_force_config.py:74](/home/robodog/loco-manipulation/UniFP/legged_gym/envs/b2/b2z1_pos_force_config.py#L74)
 
 相关参数：
 
@@ -44,14 +178,13 @@
 为什么值得看：
 
 - 这些范围是按 B2 的体量设的
-- 对 Go2 这种更小的底盘来说，可能偏大
-- 容易让训练一开始就面临过强的动力学扰动
+- 对 Go2 这种更小的底盘来说可能偏大
 
-### 2. Base force 扰动范围
+### 7. Base force 扰动范围
 
-来源:
+来源：
 
-- [legged_gym/envs/b2/b2z1_pos_force_config.py:159](/home/robodog/loco-manipulation/UniFP/legged_gym/envs/b2/b2z1_pos_force_config.py#L159)
+- [b2z1_pos_force_config.py:159](/home/robodog/loco-manipulation/UniFP/legged_gym/envs/b2/b2z1_pos_force_config.py#L159)
 
 相关参数：
 
@@ -60,35 +193,14 @@
 
 为什么值得看：
 
-- 当前只把 `gripper` 的力范围从 `60N` 收到了 `30N`
-- `base` 的扰动幅度仍然是 B2 的量级
-- 对更轻、更短的 Go2 来说，可能偏激进
+- `gripper` 已经缩过
+- `base` 这组仍是 B2 量级
 
-### 3. EE / Base 力补偿增益
+### 8. 地形高度采样窗口
 
-来源:
+来源：
 
-- [legged_gym/envs/b2/b2z1_pos_force_config.py:149](/home/robodog/loco-manipulation/UniFP/legged_gym/envs/b2/b2z1_pos_force_config.py#L149)
-- [legged_gym/envs/b2/b2z1_pos_force_config.py:167](/home/robodog/loco-manipulation/UniFP/legged_gym/envs/b2/b2z1_pos_force_config.py#L167)
-
-相关参数：
-
-- `commands.gripper_force_kp_range`
-- `commands.gripper_force_kd_range`
-- `commands.base_force_kp_range`
-- `commands.base_force_kd_range`
-
-为什么值得看：
-
-- 你已经换了机械臂、也缩了末端力范围
-- 但力补偿/偏移用的增益还在沿用 B2+Z1
-- 这会直接影响末端受力后的目标补偿幅度
-
-### 4. 地形高度采样窗口
-
-来源:
-
-- [legged_gym/envs/b2/b2z1_pos_force_config.py:200](/home/robodog/loco-manipulation/UniFP/legged_gym/envs/b2/b2z1_pos_force_config.py#L200)
+- [b2z1_pos_force_config.py:200](/home/robodog/loco-manipulation/UniFP/legged_gym/envs/b2/b2z1_pos_force_config.py#L200)
 
 相关参数：
 
@@ -97,15 +209,14 @@
 
 为什么值得看：
 
-- 这是地形感知窗口
-- B2 的身体更大，采样覆盖范围也更大
-- Go2 的机身和足迹更紧凑，未必需要这么宽的窗口
+- Go2 足迹更紧凑
+- 这个感知窗口未必还需要 B2 那么宽
 
-### 5. 步态节律先验
+### 9. 步态节律先验
 
-来源:
+来源：
 
-- [legged_gym/envs/b2/b2z1_pos_force_config.py:268](/home/robodog/loco-manipulation/UniFP/legged_gym/envs/b2/b2z1_pos_force_config.py#L268)
+- [b2z1_pos_force_config.py:268](/home/robodog/loco-manipulation/UniFP/legged_gym/envs/b2/b2z1_pos_force_config.py#L268)
 
 相关参数：
 
@@ -115,14 +226,14 @@
 
 为什么值得看：
 
-- 这些在隐式定义腿部参考步态的时序和摆幅
-- Go2 的自然步态节奏不一定和 B2 一样
+- 这些隐式定义了腿部参考步态的节律和摆幅
+- Go2 的自然节奏不一定与 B2 一样
 
-### 6. Whole-body reaching 相关奖励约束
+### 10. Whole-body reaching 相关奖励约束
 
-来源:
+来源：
 
-- [legged_gym/envs/b2/b2z1_pos_force_config.py:278](/home/robodog/loco-manipulation/UniFP/legged_gym/envs/b2/b2z1_pos_force_config.py#L278)
+- [b2z1_pos_force_config.py:278](/home/robodog/loco-manipulation/UniFP/legged_gym/envs/b2/b2z1_pos_force_config.py#L278)
 
 相关参数：
 
@@ -134,13 +245,11 @@
 - 这两个会抑制机身俯仰/侧倾
 - 如果目标是让 Go2 更积极用身体帮助机械臂够点，这两个项非常关键
 
-## 也很可能要看
+### 11. Base 命令范围
 
-### 7. Base 命令范围
+来源：
 
-来源:
-
-- [legged_gym/envs/b2/b2z1_pos_force_config.py:128](/home/robodog/loco-manipulation/UniFP/legged_gym/envs/b2/b2z1_pos_force_config.py#L128)
+- [b2z1_pos_force_config.py:128](/home/robodog/loco-manipulation/UniFP/legged_gym/envs/b2/b2z1_pos_force_config.py#L128)
 
 相关参数：
 
@@ -150,14 +259,14 @@
 
 为什么值得看：
 
-- 这组范围是按 B2 任务经验定的
-- `Go2 + Piper` 的最稳妥速度范围不一定相同
+- 这组速度范围是按 B2 任务经验定的
+- `Go2 + Piper` 的可用范围不一定相同
 
-### 8. 扰动持续时间与频率
+### 12. 扰动持续时间与频率
 
-来源:
+来源：
 
-- [legged_gym/envs/b2/b2z1_pos_force_config.py:142](/home/robodog/loco-manipulation/UniFP/legged_gym/envs/b2/b2z1_pos_force_config.py#L142)
+- [b2z1_pos_force_config.py:142](/home/robodog/loco-manipulation/UniFP/legged_gym/envs/b2/b2z1_pos_force_config.py#L142)
 
 相关参数：
 
@@ -168,14 +277,13 @@
 
 为什么值得看：
 
-- 力值大小不是唯一因素
-- 同样的力如果持续更久，小机体感受到的扰动也会更明显
+- 同样的力值，持续更久会让小机体更难受
 
-### 9. 电机强度随机化
+### 13. 电机强度随机化
 
-来源:
+来源：
 
-- [legged_gym/envs/b2/b2z1_pos_force_config.py:82](/home/robodog/loco-manipulation/UniFP/legged_gym/envs/b2/b2z1_pos_force_config.py#L82)
+- [b2z1_pos_force_config.py:82](/home/robodog/loco-manipulation/UniFP/legged_gym/envs/b2/b2z1_pos_force_config.py#L82)
 
 相关参数：
 
@@ -185,13 +293,12 @@
 为什么值得看：
 
 - Go2 腿和 Piper 臂的驱动特性与 B2+Z1 不同
-- 这两个区间未必还是最合理的随机化范围
 
-### 10. 末端负载随机化
+### 14. 末端负载随机化
 
-来源:
+来源：
 
-- [legged_gym/envs/b2/b2z1_pos_force_config.py:90](/home/robodog/loco-manipulation/UniFP/legged_gym/envs/b2/b2z1_pos_force_config.py#L90)
+- [b2z1_pos_force_config.py:90](/home/robodog/loco-manipulation/UniFP/legged_gym/envs/b2/b2z1_pos_force_config.py#L90)
 
 相关参数：
 
@@ -200,13 +307,12 @@
 为什么值得看：
 
 - Piper 的末端结构和 Z1 不一样
-- 若要考虑抓取负载泛化，这个范围最好按 Piper 重新定
 
-### 11. 初始状态随机化
+### 15. 初始状态随机化
 
-来源:
+来源：
 
-- [legged_gym/envs/b2/b2z1_pos_force_config.py:66](/home/robodog/loco-manipulation/UniFP/legged_gym/envs/b2/b2z1_pos_force_config.py#L66)
+- [b2z1_pos_force_config.py:66](/home/robodog/loco-manipulation/UniFP/legged_gym/envs/b2/b2z1_pos_force_config.py#L66)
 
 相关参数：
 
@@ -216,14 +322,13 @@
 
 为什么值得看：
 
-- 这套初始扰动大小是按 B2 习惯设定的
-- 换成 Go2 后未必仍是最合适的训练起点分布
+- 这套初始扰动大小还是按 B2 习惯设定的
 
-## 奖励里可以后看但别忘记
+## 三、奖励里可以后看但别忘记
 
-来源:
+来源：
 
-- [legged_gym/envs/b2/b2z1_pos_force_config.py:281](/home/robodog/loco-manipulation/UniFP/legged_gym/envs/b2/b2z1_pos_force_config.py#L281)
+- [b2z1_pos_force_config.py:281](/home/robodog/loco-manipulation/UniFP/legged_gym/envs/b2/b2z1_pos_force_config.py#L281)
 
 值得留意的项：
 
@@ -244,24 +349,17 @@
 为什么值得看：
 
 - 这些不是“尺寸变化后一定立刻出问题”的参数
-- 但如果后面出现 “动作发僵”、“腿太保守”、“手臂抖动” 或 “whole-body 不积极” 的问题，这些项通常会参与原因
+- 但如果后面出现“动作发僵”“腿太保守”“手臂抖动”或“whole-body 不积极”，这些项通常会参与原因
 
-## 建议的调参顺序
+## 四、建议的调参顺序
 
-如果只想先看最重要的，建议按这个顺序排查：
+如果只想先看最重要的，建议按这个顺序：
 
-1. `added_mass_range`
-2. `added_com_range_x/y/z`
-3. `max_push_force_xyz_base_cmd/ext`
-4. `gripper_force_kp_range / kd_range`
-5. `base_force_kp_range / kd_range`
-6. `terrain.measured_points_x / y`
-7. `rewards.cycle_time`
-8. `rewards.scales.base_height`
-9. `rewards.scales.ang_vel_xy`
-
-## 备注
-
-- 以上清单只列“目前没改，但值得重新评估”的项
-- 不代表这些参数一定错
-- 只是它们目前仍继承自 B2+Z1，而 `Go2 + Piper` 的形态、质量分布、末端工作空间和动态特性都明显不同
+1. `goal_ee` 采样空间与 `sphere_center`
+2. `max_push_force_xyz_base_cmd/ext`
+3. `gripper_force_kp_range / base_force_kd_range`
+4. `rewards.scales.base_height / ang_vel_xy`
+5. `added_mass_range`
+6. `added_com_range_x/y/z`
+7. `terrain.measured_points_x / y`
+8. `cycle_time / target_joint_pos_scale / target_joint_pos_thd`

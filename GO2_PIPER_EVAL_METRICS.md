@@ -41,9 +41,9 @@ python eval_go2piperposforce.py --task=go2_piper_pos_force --load_run=<run_name>
 输出文件：
 
 - `summary.json`
-  机器可读结果，适合做版本对比和后处理
+  机器可读结果，适合做版本对比和后处理，也会记录这次实际评测解析到的 run 和 checkpoint
 - `summary.md`
-  人类可读摘要
+  人类可读摘要，也会记录这次实际使用的模型文件、run 名和 checkpoint
 
 ## 3. Benchmark 场景
 
