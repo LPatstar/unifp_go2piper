@@ -12,20 +12,20 @@ class Go2PiperPosForceRoughCfg(B2Z1PosForceRoughCfg):
         # This is intentionally tighter than the original B2 box so the debug
         # red frame and the actual EE collision rejection volume better match
         # the smaller Go2 body.
-        collision_upper_limits = [0.30, 0.16, -0.10]
-        collision_lower_limits = [-0.32, -0.16, -0.45]
-        underground_limit = -0.45
+        collision_upper_limits = [0.30, 0.16, 0.03]
+        collision_lower_limits = [-0.32, -0.16, -0.32]
+        underground_limit = -0.32
         arm_induced_pitch = 0.12
 
         class sphere_center(B2Z1PosForceRoughCfg.goal_ee.sphere_center):
             x_offset = -0.03
             y_offset = 0.0
-            z_invariant_offset = 0.48
+            z_invariant_offset = 0.35
 
         class ranges(B2Z1PosForceRoughCfg.goal_ee.ranges):
             init_pos_start = [0.42, np.pi / 8, 0.0]
             init_pos_end = [0.42, 0.0, 0.0]
-            pos_l = [0.30, 0.72]
+            pos_l = [0.30, 0.77]
             pos_p = [-np.pi / 2.7, np.pi / 2.7]
             pos_y = [-3 * np.pi / 5, 3 * np.pi / 5]
             delta_orn_r = [-0.35, 0.35]
@@ -57,6 +57,13 @@ class Go2PiperPosForceRoughCfg(B2Z1PosForceRoughCfg):
             "piper_joint8": -0.01,
         }
 
+    class domain_rand(B2Z1PosForceRoughCfg.domain_rand):
+        added_mass_range = [0.0, 5.0]
+        randomize_base_com = True
+        added_com_range_x = [-0.05, 0.05]
+        added_com_range_y = [-0.05, 0.05]
+        added_com_range_z = [-0.05, 0.05]
+
     class env(B2Z1PosForceRoughCfg.env):
         num_leg_dofs = 12
         # Preserve the original B2Z1 learning layout:
@@ -77,6 +84,8 @@ class Go2PiperPosForceRoughCfg(B2Z1PosForceRoughCfg):
         # externally applied disturbances.
         max_push_force_xyz_gripper_cmd = [-30, 30]
         max_push_force_xyz_gripper_ext = [-30, 30]
+        max_push_force_xyz_base_cmd = [-10, 10]
+        max_push_force_xyz_base_ext = [-10, 10]
         gripper_force_kp_range = [200., 200.]
         base_force_kd_range = [30.0, 30.0]
 
