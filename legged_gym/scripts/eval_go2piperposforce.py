@@ -40,6 +40,7 @@ class Phase:
     ee_ext_force_local: np.ndarray
     base_ext_force_local: np.ndarray
     collect: bool = True
+    primary_collect: bool = True
     tag: str = "main"
 
 
@@ -75,6 +76,7 @@ def get_eval_args():
         },
         {"name": "--eval_repeats", "type": int, "default": 1, "help": "Repeat each scripted scenario this many times."},
         {"name": "--output_dir", "type": str, "default": "eval_reports", "help": "Directory for eval outputs."},
+        {"name": "--no_report", "action": "store_true", "default": False, "help": "Run evaluation without exporting summary files."},
     ]
     args = gymutil.parse_arguments(description="Go2+Piper evaluation", custom_parameters=custom_parameters)
     args.sim_device_id = args.compute_device_id
@@ -176,6 +178,7 @@ def phase(
     ee_ext_force_local=(0.0, 0.0, 0.0),
     base_ext_force_local=(0.0, 0.0, 0.0),
     collect=True,
+    primary_collect=True,
     tag="main",
 ):
     return Phase(
@@ -187,6 +190,7 @@ def phase(
         ee_ext_force_local=np.asarray(ee_ext_force_local, dtype=np.float32),
         base_ext_force_local=np.asarray(base_ext_force_local, dtype=np.float32),
         collect=collect,
+        primary_collect=primary_collect,
         tag=tag,
     )
 
@@ -247,7 +251,7 @@ def build_scenarios(home_local: np.ndarray) -> Dict[str, List[Scenario]]:
                 success_threshold=0.06,
                 phases=[
                     phase(0.6, home_local, collect=False, tag="warmup"),
-                    phase(0.8, hybrid_front, tag="pre_force"),
+                    phase(0.8, hybrid_front, primary_collect=False, tag="pre_force"),
                     phase(
                         1.4,
                         hybrid_front,
@@ -263,7 +267,7 @@ def build_scenarios(home_local: np.ndarray) -> Dict[str, List[Scenario]]:
                 success_threshold=0.06,
                 phases=[
                     phase(0.6, home_local, collect=False, tag="warmup"),
-                    phase(0.8, hybrid_left, tag="pre_force"),
+                    phase(0.8, hybrid_left, primary_collect=False, tag="pre_force"),
                     phase(
                         1.4,
                         hybrid_left,
@@ -279,7 +283,7 @@ def build_scenarios(home_local: np.ndarray) -> Dict[str, List[Scenario]]:
                 success_threshold=0.06,
                 phases=[
                     phase(0.6, home_local, collect=False, tag="warmup"),
-                    phase(0.8, hybrid_right, tag="pre_force"),
+                    phase(0.8, hybrid_right, primary_collect=False, tag="pre_force"),
                     phase(
                         1.4,
                         hybrid_right,
@@ -297,7 +301,7 @@ def build_scenarios(home_local: np.ndarray) -> Dict[str, List[Scenario]]:
                 success_threshold=0.08,
                 phases=[
                     phase(0.6, home_local, collect=False, tag="warmup"),
-                    phase(0.8, home_local, base_cmd=(0.25, 0.0, 0.0), tag="nominal"),
+                    phase(0.8, home_local, base_cmd=(0.25, 0.0, 0.0), primary_collect=False, tag="nominal"),
                     phase(
                         1.6,
                         home_local,
@@ -314,7 +318,7 @@ def build_scenarios(home_local: np.ndarray) -> Dict[str, List[Scenario]]:
                 success_threshold=0.08,
                 phases=[
                     phase(0.6, home_local, collect=False, tag="warmup"),
-                    phase(0.8, home_local, base_cmd=(0.0, 0.18, 0.0), tag="nominal"),
+                    phase(0.8, home_local, base_cmd=(0.0, 0.18, 0.0), primary_collect=False, tag="nominal"),
                     phase(
                         1.6,
                         home_local,
@@ -390,6 +394,7 @@ def apply_profile(env, profile: Phase):
 
     ee_target = torch.tensor(profile.ee_target_local, device=device, dtype=torch.float).unsqueeze(0).repeat(num_envs, 1)
     env._set_key_command_ee_goal_local_cart(env_ids, ee_target)
+    env._update_key_command_ee_goal()
 
     base_cmd = torch.tensor(profile.base_cmd, device=device, dtype=torch.float).unsqueeze(0).repeat(num_envs, 1)
     env.commands[:, 0:3] = base_cmd
@@ -409,7 +414,20 @@ def apply_profile(env, profile: Phase):
     env.forces[:, env.robot_base_idx, :3] = base_ext_force_global
 
 
-def compute_step_metrics(env, latent_pred_tensor: torch.Tensor) -> Dict[str, torch.Tensor]:
+def refresh_policy_observation(env, obs):
+    if not isinstance(obs, dict) or "obs" not in obs:
+        return obs
+
+    obs_tensor = obs["obs"]
+    if obs_tensor is None:
+        return obs
+
+    latest_frame = obs_tensor[:, -env.num_single_obs:]
+    latest_frame[:, -15:] = (env.commands * env.commands_scale)[:, :15]
+    return obs
+
+
+def compute_step_metrics(env, latent_pred_tensor: torch.Tensor, gt_obs_pred_tensor: torch.Tensor) -> Dict[str, torch.Tensor]:
     nominal_ee_error = torch.norm(env.ee_pos - env.curr_ee_goal_cart_world, dim=1)
 
     gripper_cmd_global = quat_apply(env.base_yaw_quat, env.current_Fxyz_gripper_cmd)
@@ -438,7 +456,7 @@ def compute_step_metrics(env, latent_pred_tensor: torch.Tensor) -> Dict[str, tor
     energy_proxy = torch.mean(torch.abs(env.torques * env.dof_vel), dim=1)
 
     pred = latent_pred_tensor.to(dtype=torch.float, device=env.device)
-    gt = env.obs_pred
+    gt = gt_obs_pred_tensor.to(dtype=torch.float, device=env.device)
 
     obs_scales = env.obs_scales
     sphere_scale = torch.tensor(
@@ -500,6 +518,19 @@ def stack_or_empty(values: List[np.ndarray], num_envs: int) -> np.ndarray:
     return np.stack(values, axis=0)
 
 
+def metric_values_for_case(case_name: str, tags: Dict[str, Dict[str, List[float]]], all_metrics: Dict[str, List[float]], metric_name: str) -> List[float]:
+    if case_name == "position_only":
+        return tags["track"].get(metric_name, all_metrics[metric_name])
+    if case_name == "hybrid_force_position":
+        return tags["force_track"].get(metric_name, all_metrics[metric_name])
+    if case_name == "base_disturbance":
+        if metric_name == "yaw_rate_error":
+            return tags["yaw_track"].get(metric_name, [])
+        if metric_name in ("base_nominal_vel_error", "base_comp_vel_error"):
+            return tags["disturbance"].get(metric_name, all_metrics[metric_name])
+    return all_metrics[metric_name]
+
+
 def compute_settling_times(error_matrix: np.ndarray, dt: float, threshold: float, dwell_s: float = 0.25) -> List[float]:
     if error_matrix.size == 0:
         return []
@@ -544,11 +575,11 @@ def summarize_case(case_name: str, case_records: Dict, dt: float) -> Dict[str, f
     settling_times = case_records["settling_times"]
     reset_flags = case_records["reset_flags"]
 
-    nominal_ee_rmse_m = rms_or_nan(all_metrics["nominal_ee_error"])
-    compensated_ee_rmse_m = rms_or_nan(all_metrics["compensated_ee_error"])
-    base_nominal_vel_rmse = rms_or_nan(all_metrics["base_nominal_vel_error"])
-    base_comp_vel_rmse = rms_or_nan(all_metrics["base_comp_vel_error"])
-    yaw_rate_rmse = rms_or_nan(all_metrics["yaw_rate_error"])
+    nominal_ee_rmse_m = rms_or_nan(metric_values_for_case(case_name, tags, all_metrics, "nominal_ee_error"))
+    compensated_ee_rmse_m = rms_or_nan(metric_values_for_case(case_name, tags, all_metrics, "compensated_ee_error"))
+    base_nominal_vel_rmse = rms_or_nan(metric_values_for_case(case_name, tags, all_metrics, "base_nominal_vel_error"))
+    base_comp_vel_rmse = rms_or_nan(metric_values_for_case(case_name, tags, all_metrics, "base_comp_vel_error"))
+    yaw_rate_rmse = rms_or_nan(metric_values_for_case(case_name, tags, all_metrics, "yaw_rate_error"))
 
     posture_abs = []
     posture_abs.extend(all_metrics["roll_abs"])
@@ -751,6 +782,8 @@ def run_scenario(env, policy, obs, scenario: Scenario, estimator_records, global
         steps = max(1, int(round(ph.duration_s / dt)))
         for _ in range(steps):
             apply_profile(env, ph)
+            obs = refresh_policy_observation(env, obs)
+            gt_obs_pred_tensor = env.obs_pred.detach().clone()
             actions = policy(obs, policy_info)
             obs, _, dones, _ = env.step(actions.detach())
             latent_pred_tensor = torch.tensor(policy_info["latents"], device=env.device, dtype=torch.float)
@@ -758,16 +791,17 @@ def run_scenario(env, policy, obs, scenario: Scenario, estimator_records, global
             any_reset_mask |= dones.bool()
 
             if ph.collect and torch.any(active_mask):
-                metrics = compute_step_metrics(env, latent_pred_tensor)
+                metrics = compute_step_metrics(env, latent_pred_tensor, gt_obs_pred_tensor)
                 append_case_records(scenario_records, metrics, active_mask, ph.tag)
                 append_case_records({"all": estimator_records, "tags": defaultdict(lambda: defaultdict(list))}, metrics, active_mask, "all")
                 append_case_records({"all": global_records, "tags": defaultdict(lambda: defaultdict(list))}, metrics, active_mask, "all")
 
-                active_cpu = active_mask.detach().cpu().numpy().astype(bool)
-                primary_values = metrics[scenario.primary_metric].detach().cpu().numpy()
-                row = np.full(num_envs, np.nan, dtype=np.float32)
-                row[active_cpu] = primary_values[active_cpu]
-                segment_primary_errors.append(row)
+                if ph.primary_collect:
+                    active_cpu = active_mask.detach().cpu().numpy().astype(bool)
+                    primary_values = metrics[scenario.primary_metric].detach().cpu().numpy()
+                    row = np.full(num_envs, np.nan, dtype=np.float32)
+                    row[active_cpu] = primary_values[active_cpu]
+                    segment_primary_errors.append(row)
 
                 scenario_records["foot_slip_total"] += float(torch.sum(metrics["foot_slip_events"][active_mask]).item())
                 scenario_records["foot_contact_total"] += float(torch.sum(metrics["foot_contact_count"][active_mask]).item())
@@ -971,8 +1005,11 @@ def print_console_summary(case_summaries, estimator_summary, runtime_quality, ov
         f"collision={format_float(runtime_quality['collision_step_ratio_pct'], 2)} %"
     )
     print("")
-    print(f"Saved JSON report to : {output_files['json']}")
-    print(f"Saved Markdown to    : {output_files['md']}")
+    if output_files is None:
+        print("Report export        : disabled (`--no_report`)")
+    else:
+        print(f"Saved JSON report to : {output_files['json']}")
+        print(f"Saved Markdown to    : {output_files['md']}")
 
 
 def run_evaluation(args):
@@ -1107,8 +1144,6 @@ def run_evaluation(args):
         "env_cfg": class_to_dict(env_cfg),
     }
     metadata.update(resolve_model_metadata(args, train_cfg))
-    output_files = output_paths(args, train_cfg)
-
     result_payload = {
         "metadata": metadata,
         "cases": case_summaries,
@@ -1116,12 +1151,15 @@ def run_evaluation(args):
         "runtime_quality": runtime_quality,
         "overall": overall_summary,
     }
-    with open(output_files["json"], "w", encoding="utf-8") as f:
-        json.dump(make_json_safe(result_payload), f, indent=2, ensure_ascii=False)
+    output_files = None
+    if not args.no_report:
+        output_files = output_paths(args, train_cfg)
+        with open(output_files["json"], "w", encoding="utf-8") as f:
+            json.dump(make_json_safe(result_payload), f, indent=2, ensure_ascii=False)
 
-    markdown = build_markdown_report(metadata, case_summaries, estimator_summary, runtime_quality, overall_summary)
-    with open(output_files["md"], "w", encoding="utf-8") as f:
-        f.write(markdown + "\n")
+        markdown = build_markdown_report(metadata, case_summaries, estimator_summary, runtime_quality, overall_summary)
+        with open(output_files["md"], "w", encoding="utf-8") as f:
+            f.write(markdown + "\n")
 
     print_console_summary(case_summaries, estimator_summary, runtime_quality, overall_summary, output_files)
 

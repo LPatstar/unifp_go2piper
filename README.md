@@ -150,6 +150,8 @@ Useful options:
   Repeat each scripted scenario `N` times before aggregating the final report.
 - `--output_dir <dir>`
   Directory used to save the exported evaluation reports. Default is `eval_reports/`.
+- `--no_report`
+  Run the benchmark without exporting `summary.json` or `summary.md`. Useful for quick terminal-only checks.
 
 Outputs:
 
@@ -157,6 +159,8 @@ Outputs:
   Structured metrics for each evaluation case, estimator quality, runtime quality metrics, the final overall score, and the resolved model run/checkpoint that was actually evaluated.
 - `summary.md`
   Human-readable report with the main scores, raw physical metrics, and the resolved model run/checkpoint metadata.
+
+If `--no_report` is set, the script still runs the full benchmark and prints the console summary, but it skips creating the output directory and does not write any report files.
 
 For a detailed explanation of the benchmark design and every metric, see [GO2_PIPER_EVAL_METRICS.md](GO2_PIPER_EVAL_METRICS.md).
 

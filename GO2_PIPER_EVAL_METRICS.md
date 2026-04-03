@@ -37,6 +37,8 @@ python eval_go2piperposforce.py --task=go2_piper_pos_force --load_run=<run_name>
   并行评测环境数
 - `--output_dir <dir>`
   评测报告输出目录，默认是项目根目录下的 `eval_reports/`
+- `--no_report`
+  只在终端打印评测摘要，不导出 `summary.json` 和 `summary.md`
 
 输出文件：
 
@@ -44,6 +46,8 @@ python eval_go2piperposforce.py --task=go2_piper_pos_force --load_run=<run_name>
   机器可读结果，适合做版本对比和后处理，也会记录这次实际评测解析到的 run 和 checkpoint
 - `summary.md`
   人类可读摘要，也会记录这次实际使用的模型文件、run 名和 checkpoint
+
+如果加了 `--no_report`，脚本仍会完整跑完 benchmark，并在终端打印总分和各 case 摘要，但不会创建输出目录，也不会写任何报告文件。
 
 ## 3. Benchmark 场景
 
@@ -85,6 +89,7 @@ python eval_go2piperposforce.py --task=go2_piper_pos_force --load_run=<run_name>
 - 当前 benchmark 并没有构造显式接触物体任务
 - 因此这里更准确地说是在测“力补偿下的目标跟踪”和“force estimator 质量”
 - 它不是现实接触任务里的最终力控制成功率
+- 主 tracking、success 和 settling 指标只统计真正的 `force_track` 段，不把前面的 `pre_force` 准备段混进去
 
 ## 3.3 Base Disturbance
 
@@ -99,6 +104,8 @@ python eval_go2piperposforce.py --task=go2_piper_pos_force --load_run=<run_name>
 - 给固定 `vx / vy / yaw`
 - 再加 base force command 和 base 外部力
 - 重点看底盘速度是否接近“补偿后的目标速度”
+- 平移受扰 tracking 只统计 `disturbance` 段
+- `base_yaw_tracking` 只用于 yaw 维度，不再混入平移速度 RMSE
 
 ## 3.4 Mixed Whole-Body
 
@@ -265,6 +272,13 @@ python eval_go2piperposforce.py --task=go2_piper_pos_force --load_run=<run_name>
 
 - 策略 latent 解码输出
 - 环境提供的 `obs_pred` 真值
+
+这里的时序口径与训练保持一致：
+
+- 用当前 observation 送入 policy，得到当前时刻的 latent 预测
+- 再与同一时刻的 `obs_pred` 真值比较
+
+它不是 next-step prediction 指标。
 
 评测 4 项：
 
