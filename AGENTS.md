@@ -124,6 +124,7 @@ Task registration:
 Do not commit these local or generated artifacts:
 - `eval_reports/`
 - `wandb/`
+- `wandb_exports/`
 - `logs/`
 - `__pycache__/`
 - local Isaac Gym install directories

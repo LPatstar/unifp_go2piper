@@ -164,6 +164,53 @@ If `--no_report` is set, the script still runs the full benchmark and prints the
 
 For a detailed explanation of the benchmark design and every metric, see [GO2_PIPER_EVAL_METRICS.md](GO2_PIPER_EVAL_METRICS.md).
 
+#### WandB Data Export
+Use the root-level WandB export helper to pull training curves and metadata into a local folder for plotting or offline comparison.
+
+```bash
+# Export the latest local training run recorded under logs/
+python fetch_wandb_data.py
+
+# Export a specific run by name
+python fetch_wandb_data.py --run_name=Apr03_22-02-52_go2_piper_tuned2
+```
+
+Useful options:
+
+- `--run_name <name>`
+  Target a specific training run. The script accepts an exact WandB run name, a local `logs/...` directory name, or the short local `run_name` suffix.
+- `--history_stride <N>`
+  Downsample WandB history during export. By default the script keeps one row every `1000` training iterations (`global_step`) and also keeps the final row.
+- `--entity <entity>`
+  Override the WandB entity/team if it cannot be inferred automatically from the current WandB login state.
+- `--project <project>`
+  WandB project name. Default is `UniFP`.
+- `--output_dir <dir>`
+  Directory used to store the exported run files. Default is `wandb_exports/`.
+
+Outputs:
+
+- `run_info.json`
+  Resolved run metadata, including the final WandB run name, id, URL, and how the target run was resolved.
+- `summary.json`
+  WandB summary metrics for the selected run.
+- `config.json`
+  WandB config for the selected run.
+- `history.jsonl`
+  Downsampled, cleaned metric history aligned by training iteration.
+- `history.csv`
+  Downsampled, cleaned metric history in CSV format for spreadsheet-style inspection.
+- `ai_ready.json`
+  A single compact file that bundles run metadata, summary, config, and the cleaned/downsampled iteration-aligned history for AI-assisted tuning or lightweight sharing.
+
+Notes:
+
+- By default the script does not export every raw point. It keeps one iteration-aligned history row every `1000` training steps plus the final row. You can change this with `--history_stride <N>`.
+- When the matching local TensorBoard event file is available, the script prefers it over WandB history so the main `history` section follows the real training-step axis instead of WandB's internal event indexing.
+- Before downsampling, scalar rows from the same training iteration are merged into a single record, so repeated `_step/_runtime/_timestamp` lines are collapsed.
+- The history export is also filtered by the keys that appear in `summary.json`, so obvious low-value system metrics such as GPU fan speed are skipped by default.
+- Metrics logged only on the TensorBoard `/time` axis are intentionally excluded from the compact export, so `ai_ready.json` stays focused on training-iteration data that is useful for tuning.
+
 ### Parameter Configuration
 
 #### Training Parameters
