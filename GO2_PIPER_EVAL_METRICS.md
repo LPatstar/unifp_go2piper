@@ -47,6 +47,8 @@ python eval_go2piperposforce.py --task=go2_piper_pos_force --load_run=<run_name>
 - `summary.md`
   人类可读摘要，也会记录这次实际使用的模型文件、run 名和 checkpoint
 
+默认情况下，评测输出文件夹名也会直接带上解析到的 run 名和 checkpoint，方便后续在调参记录里引用和回溯。
+
 如果加了 `--no_report`，脚本仍会完整跑完 benchmark，并在终端打印总分和各 case 摘要，但不会创建输出目录，也不会写任何报告文件。
 
 ## 3. Benchmark 场景

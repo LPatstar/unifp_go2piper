@@ -160,6 +160,8 @@ Outputs:
 - `summary.md`
   Human-readable report with the main scores, raw physical metrics, and the resolved model run/checkpoint metadata.
 
+By default the exported report folder name also includes the resolved run name and checkpoint, so it is easier to match each eval result back to a tuning note.
+
 If `--no_report` is set, the script still runs the full benchmark and prints the console summary, but it skips creating the output directory and does not write any report files.
 
 For a detailed explanation of the benchmark design and every metric, see [GO2_PIPER_EVAL_METRICS.md](GO2_PIPER_EVAL_METRICS.md).

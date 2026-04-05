@@ -17,3 +17,5 @@ UniFP-Paper.txt
 2505.20829v2.txt
 eval_reports/
 wandb_exports/
+tuning_records/*
+!tuning_records/README.md

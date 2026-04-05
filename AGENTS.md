@@ -103,6 +103,7 @@ Task registration:
 ## Evaluation Notes
 
 - Automated evaluation writes reports under `eval_reports/`.
+- Report folder names include the resolved run name and checkpoint so they can be matched back to tuning notes.
 - `summary.json` is the machine-readable artifact.
 - `summary.md` is the human-readable report.
 - The report section named `Runtime Quality` summarizes runtime stability / posture / contact cleanliness / slip / smoothness.

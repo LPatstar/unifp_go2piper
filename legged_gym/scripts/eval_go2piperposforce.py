@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import re
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
@@ -859,11 +860,19 @@ def make_empty_case_records():
     }
 
 
-def output_paths(args, train_cfg):
+def safe_path_name(name):
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", str(name))
+
+
+def output_paths(args, metadata):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = args.load_run if args.load_run is not None else "latest"
-    safe_run_name = str(run_name).replace("/", "_")
-    output_root = os.path.join(LEGGED_GYM_ROOT_DIR, args.output_dir, f"{args.task}_{safe_run_name}_{timestamp}")
+    safe_run_name = safe_path_name(metadata["resolved_run_name"])
+    safe_checkpoint = safe_path_name(metadata["resolved_checkpoint"])
+    output_root = os.path.join(
+        LEGGED_GYM_ROOT_DIR,
+        args.output_dir,
+        f"{args.task}_{safe_run_name}_ckpt{safe_checkpoint}_{timestamp}",
+    )
     os.makedirs(output_root, exist_ok=True)
     return {
         "root": output_root,
@@ -1153,7 +1162,7 @@ def run_evaluation(args):
     }
     output_files = None
     if not args.no_report:
-        output_files = output_paths(args, train_cfg)
+        output_files = output_paths(args, metadata)
         with open(output_files["json"], "w", encoding="utf-8") as f:
             json.dump(make_json_safe(result_payload), f, indent=2, ensure_ascii=False)
 
