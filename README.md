@@ -98,6 +98,15 @@ python train_go2piperposforce.py --task=go2_piper_pos_force --headless
 python play_go2piperposforce.py --task=go2_piper_pos_force --load_run=<run_name>
 ```
 
+Useful options:
+
+- `--draw`
+  Run a short play window, record joint command/actual trajectories, then stop and save two plots: one for a front-left leg and one for the task-relevant arm joints. The shared script auto-resolves the correct arm joint names for Go2+Piper and B2+Z1.
+- `--draw_steps <N>`
+  Number of play steps to record before saving the plots. Default is `1000`.
+
+When `--draw` is enabled, the saved figures are written under `play_draws/` in the project root.
+
 #### Keyboard-Controlled Keyplay
 Use the keyplay script to manually command the Go2+Piper policy from the viewer instead of relying on randomized commands.
 
@@ -158,9 +167,7 @@ Outputs:
 - `summary.json`
   Structured metrics for each evaluation case, estimator quality, runtime quality metrics, the final overall score, and the resolved model run/checkpoint that was actually evaluated.
 - `summary.md`
-  Human-readable report with the main scores, raw physical metrics, and the resolved model run/checkpoint metadata.
-
-By default the exported report folder name also includes the resolved run name and checkpoint, so it is easier to match each eval result back to a tuning note.
+  Human-readable version of the same evaluation result. The exported report folder name also includes the resolved run name and checkpoint so each eval can be matched back to a tuning note.
 
 If `--no_report` is set, the script still runs the full benchmark and prints the console summary, but it skips creating the output directory and does not write any report files.
 
@@ -203,15 +210,14 @@ Outputs:
 - `history.csv`
   Downsampled, cleaned metric history in CSV format for spreadsheet-style inspection.
 - `ai_ready.json`
-  A single compact file that bundles run metadata, summary, config, and the cleaned/downsampled iteration-aligned history for AI-assisted tuning or lightweight sharing.
+  The preferred compact file for AI-assisted tuning. It bundles run metadata, summary, config, and the cleaned/downsampled iteration-aligned history in one place.
 
 Notes:
 
-- By default the script does not export every raw point. It keeps one iteration-aligned history row every `1000` training steps plus the final row. You can change this with `--history_stride <N>`.
-- When the matching local TensorBoard event file is available, the script prefers it over WandB history so the main `history` section follows the real training-step axis instead of WandB's internal event indexing.
-- Before downsampling, scalar rows from the same training iteration are merged into a single record, so repeated `_step/_runtime/_timestamp` lines are collapsed.
-- The history export is also filtered by the keys that appear in `summary.json`, so obvious low-value system metrics such as GPU fan speed are skipped by default.
-- Metrics logged only on the TensorBoard `/time` axis are intentionally excluded from the compact export, so `ai_ready.json` stays focused on training-iteration data that is useful for tuning.
+- By default the script keeps one iteration-aligned history row every `1000` training steps plus the final row. You can change this with `--history_stride <N>`.
+- When the matching local TensorBoard event file is available, the script prefers it over WandB history so the exported `history` follows the real training-step axis instead of WandB's internal event indexing.
+- Before downsampling, scalar rows from the same training iteration are merged into a single record, and the export is filtered by the keys that appear in `summary.json`, so repeated timestamp lines and obvious low-value system metrics such as GPU fan speed are skipped.
+- Metrics logged only on the TensorBoard `/time` axis are intentionally excluded so `ai_ready.json` stays focused on training-iteration data that is useful for tuning.
 
 ### Parameter Configuration
 

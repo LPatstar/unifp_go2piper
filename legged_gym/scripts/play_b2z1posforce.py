@@ -3,10 +3,13 @@ unitree_rl_gym_path = os.path.abspath(__file__ + "../../../../")
 import sys
 sys.path.append(unitree_rl_gym_path)
 from legged_gym import LEGGED_GYM_ROOT_DIR
+from datetime import datetime
+import re
 
 import isaacgym
 from legged_gym.envs import *
 from legged_gym.utils import  get_args, export_policy_as_jit, task_registry, Logger
+from legged_gym.utils.helpers import get_load_path
 
 import numpy as np
 import torch
@@ -17,6 +20,125 @@ import numpy as np
 import time
 
 ENABLE_PLAY_CMD_FORCE = False
+DRAW_JOINT_CUSTOM_PARAMETERS = [
+    {"name": "--draw", "action": "store_true", "default": False, "help": "Record joint command/actual trajectories for a short play window and save plots."},
+    {"name": "--draw_steps", "type": int, "default": 1000, "help": "Number of play steps to record before saving draw plots. Default: 1000."},
+    {"name": "--draw_dir", "type": str, "default": "play_draws", "help": "Directory for saved play draw plots. Default: play_draws/."},
+]
+PREFERRED_DRAW_LEG_JOINT_GROUPS = [
+    ["FL_hip_joint", "FL_thigh_joint", "FL_calf_joint"],
+]
+PREFERRED_DRAW_ARM_JOINT_GROUPS = [
+    [f"piper_joint{i}" for i in range(1, 6)],
+    ["z1_waist", "z1_shoulder", "z1_elbow", "z1_wrist_angle", "z1_forearm_roll"],
+]
+
+
+def get_play_args(task_default=None):
+    args = get_args(custom_parameters=DRAW_JOINT_CUSTOM_PARAMETERS)
+    if task_default and "--task" not in sys.argv:
+        args.task = task_default
+    return args
+
+
+def safe_path_component(name):
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", str(name))
+
+
+def resolve_model_metadata(train_cfg):
+    log_root = os.path.join(LEGGED_GYM_ROOT_DIR, "logs", train_cfg.runner.experiment_name)
+    resolved_model_path = get_load_path(
+        log_root,
+        load_run=train_cfg.runner.load_run,
+        checkpoint=train_cfg.runner.checkpoint,
+    )
+    resolved_run_name = os.path.basename(os.path.dirname(resolved_model_path))
+    resolved_model_file = os.path.basename(resolved_model_path)
+    resolved_checkpoint = "latest"
+    if resolved_model_file.startswith("model_") and resolved_model_file.endswith(".pt"):
+        resolved_checkpoint = resolved_model_file[len("model_"):-len(".pt")]
+    return {
+        "resolved_run_name": resolved_run_name,
+        "resolved_checkpoint": resolved_checkpoint,
+    }
+
+
+def compute_command_targets(env, actions):
+    full_targets = env.default_dof_pos[0].clone()
+    scaled_actions = actions[0].detach() * env.motor_strength[0] * env.cfg.control.action_scale
+    full_targets[:env.num_torques] = scaled_actions + env.default_dof_pos_wo_gripper[0]
+    return full_targets.detach().cpu().numpy()
+
+
+def collect_joint_indices(env, joint_names):
+    return [env.dof_names.index(name) for name in joint_names]
+
+
+def pick_first_available_joint_group(dof_names, joint_groups):
+    for joint_group in joint_groups:
+        if all(joint_name in dof_names for joint_name in joint_group):
+            return list(joint_group)
+    return None
+
+
+def resolve_draw_leg_joint_names(env):
+    resolved_joint_names = pick_first_available_joint_group(env.dof_names, PREFERRED_DRAW_LEG_JOINT_GROUPS)
+    if resolved_joint_names is not None:
+        return resolved_joint_names
+
+    fl_joint_names = [joint_name for joint_name in env.dof_names if joint_name.startswith("FL_")]
+    if len(fl_joint_names) >= 3:
+        return fl_joint_names[:3]
+
+    leg_dof_count = min(len(env.dof_names), int(getattr(env.cfg.env, "num_leg_dofs", 0)))
+    if leg_dof_count >= 3:
+        return list(env.dof_names[:3])
+
+    raise ValueError(f"Unable to resolve draw leg joints from dof_names: {env.dof_names}")
+
+
+def resolve_draw_arm_joint_names(env):
+    resolved_joint_names = pick_first_available_joint_group(env.dof_names, PREFERRED_DRAW_ARM_JOINT_GROUPS)
+    if resolved_joint_names is not None:
+        return resolved_joint_names
+
+    leg_dof_count = int(getattr(env.cfg.env, "num_leg_dofs", 0))
+    policy_arm_dof_count = max(0, int(getattr(env, "num_torques", 0)) - leg_dof_count)
+    fallback_count = min(5, policy_arm_dof_count)
+    if fallback_count > 0:
+        fallback_joint_names = env.dof_names[leg_dof_count:leg_dof_count + fallback_count]
+        if len(fallback_joint_names) == fallback_count:
+            return list(fallback_joint_names)
+
+    raise ValueError(f"Unable to resolve draw arm joints from dof_names: {env.dof_names}")
+
+
+def build_draw_output_dir(args, model_metadata):
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    root = os.path.join(
+        LEGGED_GYM_ROOT_DIR,
+        args.draw_dir,
+        f"{args.task}_{safe_path_component(model_metadata['resolved_run_name'])}_ckpt{safe_path_component(model_metadata['resolved_checkpoint'])}_{timestamp}",
+    )
+    os.makedirs(root, exist_ok=True)
+    return root
+
+
+def save_joint_tracking_plot(time_axis, joint_names, cmd_series, act_series, title, output_path):
+    fig, ax = plt.subplots(figsize=(12, 6))
+    color_cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    for idx, joint_name in enumerate(joint_names):
+        color = color_cycle[idx % len(color_cycle)]
+        ax.plot(time_axis, cmd_series[joint_name], linestyle="--", color=color, linewidth=1.5, label=f"{joint_name}-cmd")
+        ax.plot(time_axis, act_series[joint_name], linestyle="-", color=color, linewidth=1.8, label=f"{joint_name}-act")
+    ax.set_title(title)
+    ax.set_xlabel("Time [s]")
+    ax.set_ylabel("Joint Angle [rad]")
+    ax.grid(True, alpha=0.3)
+    ax.legend(ncol=2)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=160)
+    plt.close(fig)
 
 
 def play(args):
@@ -46,6 +168,7 @@ def play(args):
     train_cfg.runner.resume = True
     ppo_runner, train_cfg = task_registry.make_alg_runner(env=env, name=args.task, args=args, train_cfg=train_cfg)
     policy = ppo_runner.get_inference_policy(device=env.device)
+    model_metadata = resolve_model_metadata(train_cfg)
     
     
     # export policy as a jit module (used to run it from C++)
@@ -72,7 +195,10 @@ def play(args):
         traced_script_module.save(actor_body_path)
         print('Exported policy as jit script to: ', actor_body_path)
 
-    if VISUAL_PRED:
+    draw_mode = bool(getattr(args, "draw", False))
+    visual_pred_enabled = VISUAL_PRED and not draw_mode
+
+    if visual_pred_enabled:
         fig_ee_force = plt.figure()
         ax_ee_force = fig_ee_force.add_subplot(111, projection='3d')
         vector1_ee_force = np.array([0, 0, 0])
@@ -135,9 +261,25 @@ def play(args):
     env.enable_play_immediate_gripper_cmd_force = ENABLE_PLAY_CMD_FORCE
     if env.viewer:
         print("Viewer controls: press F to toggle follow camera on the current robot.")
+    if draw_mode:
+        draw_steps = max(1, int(getattr(args, "draw_steps", 1000)))
+        draw_leg_joint_names = resolve_draw_leg_joint_names(env)
+        draw_arm_joint_names = resolve_draw_arm_joint_names(env)
+        leg_joint_indices = collect_joint_indices(env, draw_leg_joint_names)
+        arm_joint_indices = collect_joint_indices(env, draw_arm_joint_names)
+        draw_time_axis = []
+        leg_cmd_series = {name: [] for name in draw_leg_joint_names}
+        leg_act_series = {name: [] for name in draw_leg_joint_names}
+        arm_cmd_series = {name: [] for name in draw_arm_joint_names}
+        arm_act_series = {name: [] for name in draw_arm_joint_names}
+        total_steps = draw_steps
+    else:
+        total_steps = 100 * int(env.max_episode_length)
+
     policy_info = {}
-    for i in range(100*int(env.max_episode_length)):
+    for i in range(total_steps):
         actions = policy(obs, policy_info)
+        command_targets = compute_command_targets(env, actions) if draw_mode else None
         # breakpoint()
         if FIX_COMMAND:
             env.commands[:, 0] = 0.    # 1.0
@@ -146,7 +288,17 @@ def play(args):
             env.commands[:, 3] = 0.
             # env.gait_indices[:] = 0.
         obs, rews, dones, infos = env.step(actions.detach())
-        if VISUAL_PRED:
+        if draw_mode:
+            actual_dof_pos = env.dof_pos[0].detach().cpu().numpy()
+            draw_time_axis.append((i + 1) * env.dt)
+            for joint_name, joint_idx in zip(draw_leg_joint_names, leg_joint_indices):
+                leg_cmd_series[joint_name].append(float(command_targets[joint_idx]))
+                leg_act_series[joint_name].append(float(actual_dof_pos[joint_idx]))
+            for joint_name, joint_idx in zip(draw_arm_joint_names, arm_joint_indices):
+                arm_cmd_series[joint_name].append(float(command_targets[joint_idx]))
+                arm_act_series[joint_name].append(float(actual_dof_pos[joint_idx]))
+
+        if visual_pred_enabled:
             ee_force_pred = policy_info["latents"][0, 6:9]
             vector1_ee_force = ee_force_pred
             vector2_ee_force = env.forces_local[0, env.gripper_idx].detach().cpu().numpy() * env.obs_scales.ee_force
@@ -192,11 +344,34 @@ def play(args):
             # plt.draw()
             # plt.pause(0.001)
 
+    if draw_mode:
+        output_dir = build_draw_output_dir(args, model_metadata)
+        leg_output_path = os.path.join(output_dir, "leg_joint_tracking.png")
+        arm_output_path = os.path.join(output_dir, "arm_joint_tracking.png")
+        save_joint_tracking_plot(
+            draw_time_axis,
+            draw_leg_joint_names,
+            leg_cmd_series,
+            leg_act_series,
+            "Front-left Leg Joint Command vs Actual (absolute rad)",
+            leg_output_path,
+        )
+        save_joint_tracking_plot(
+            draw_time_axis,
+            draw_arm_joint_names,
+            arm_cmd_series,
+            arm_act_series,
+            "Arm Joint Command vs Actual (absolute rad)",
+            arm_output_path,
+        )
+        print(f"Saved leg tracking plot to: {leg_output_path}")
+        print(f"Saved arm tracking plot to: {arm_output_path}")
+
 if __name__ == '__main__':
     EXPORT_POLICY = True
     RECORD_FRAMES = False
     MOVE_CAMERA = False
     FIX_COMMAND = False
     VISUAL_PRED = True
-    args = get_args()
+    args = get_play_args(task_default="b2z1_pos_force")
     play(args)

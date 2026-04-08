@@ -123,8 +123,8 @@ def update_cfg_from_args(env_cfg, cfg_train, args):
 
     return env_cfg, cfg_train
 
-def get_args():
-    custom_parameters = [
+def get_args(custom_parameters=None):
+    base_parameters = [
         {"name": "--task", "type": str, "default": "go2_piper_pos_force", "help": "Resume training or start testing from a checkpoint. Overrides config file if provided."},
         {"name": "--resume", "action": "store_true", "default": False,  "help": "Resume training from a checkpoint"},
         {"name": "--experiment_name", "type": str,  "help": "Name of the experiment to run or load. Overrides config file if provided."},
@@ -141,10 +141,12 @@ def get_args():
         {"name": "--max_iterations", "type": int, "help": "Maximum number of training iterations. Overrides config file if provided."},
         {"name": "--observe_gait_commands", "action": "store_true", "help": "if observe gait commands, ref to <walk these ways>"},
     ]
+    if custom_parameters:
+        base_parameters = base_parameters + custom_parameters
     # parse arguments
     args = gymutil.parse_arguments(
         description="RL Policy",
-        custom_parameters=custom_parameters)
+        custom_parameters=base_parameters)
 
     # name allignment
     args.sim_device_id = args.compute_device_id

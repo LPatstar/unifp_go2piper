@@ -32,6 +32,12 @@ cd legged_gym/scripts
 python play_go2piperposforce.py --task=go2_piper_pos_force --load_run=<run_name>
 ```
 
+Play with joint tracking draw export:
+```bash
+cd legged_gym/scripts
+python play_go2piperposforce.py --task=go2_piper_pos_force --load_run=<run_name> --draw
+```
+
 Keyboard teleop / manual inspection:
 ```bash
 cd legged_gym/scripts
@@ -88,9 +94,27 @@ Task registration:
 
 - `train_go2piperposforce.py` delegates to the shared B2/Z1 training implementation and forces `args.task = "go2_piper_pos_force"` when not provided.
 - `play_go2piperposforce.py` delegates to the shared play implementation and enables force visualization / play-side command-force behavior through module flags.
+- `play_go2piperposforce.py --draw` runs a short rollout, saves joint command-vs-actual plots for one front-left leg and the task-relevant arm joints, then exits. The shared play script auto-resolves the correct arm joint names for Go2+Piper and B2+Z1.
 - `keyplay_go2piperposforce.py` creates a single-env teleop setup, disables most randomization, and relies on viewer keyboard events for command updates.
 - `eval_go2piperposforce.py` is the main reproducible checkpoint benchmark. Prefer it over ad hoc `play` sessions when comparing runs.
-- `play_go2piperposforce.py`, `keyplay_go2piperposforce.py`, and `eval_go2piperposforce.py` all use checkpoint-resume loading. If `--load_run` and `--checkpoint` are omitted, the shared loader logic resolves to the latest run directory and then the latest saved `model_*.pt` checkpoint inside that run.
+- `play_go2piperposforce.py`, `keyplay_go2piperposforce.py`, and `eval_go2piperposforce.py` all use checkpoint-resume loading. If `--load_run` and `--checkpoint` are omitted, the shared loader resolves to the latest run directory and then the latest saved `model_*.pt` checkpoint inside it.
+
+## Play Draw Notes
+
+- `play --draw` is the standard joint-level diagnostic path for tuning analysis.
+- Default command:
+  - `python play_go2piperposforce.py --task=go2_piper_pos_force --load_run=<run_name> --draw`
+- Useful optional flag:
+  - `--draw_steps <N>` to control how many play steps are recorded before the script exits
+- Output directory:
+  - `play_draws/`
+- Expected files:
+  - one leg joint tracking plot
+  - one arm joint tracking plot
+- During tuning, inspect the PNG plots directly and judge both:
+  - whether actual tracks command
+  - and whether command itself already shows obvious oscillation or other bad control patterns
+- When a tuning sample does not already have draw plots, generate them before forming a tuning conclusion.
 
 ## Keyplay Notes
 
@@ -104,8 +128,7 @@ Task registration:
 
 - Automated evaluation writes reports under `eval_reports/`.
 - Report folder names include the resolved run name and checkpoint so they can be matched back to tuning notes.
-- `summary.json` is the machine-readable artifact.
-- `summary.md` is the human-readable report.
+- `summary.json` is the machine-readable artifact and `summary.md` is the human-readable report.
 - The report section named `Runtime Quality` summarizes runtime stability / posture / contact cleanliness / slip / smoothness.
 - `Overall` is the weighted benchmark total, not the same quantity as `Runtime Quality`.
 
@@ -118,7 +141,7 @@ Task registration:
   - the script layer
 - If changing keyboard control, force injection, viewer drawing, or command interpretation, inspect the shared B2 environment file before assuming the Go2 wrapper contains the logic.
 - If changing evaluation metrics or report structure, keep `README.md` and `GO2_PIPER_EVAL_METRICS.md` aligned.
-- Prefer small, targeted edits. This fork inherits duplicated concepts and upstream naming that are easy to break with broad refactors.
+- Prefer targeted edits. This fork inherits duplicated concepts and upstream naming that are easy to break with broad refactors.
 
 ## Local Artifacts And Ignore Guidance
 
