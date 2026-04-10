@@ -27,7 +27,7 @@ from legged_gym.envs.b2.legged_robot_b2z1_pos_force import (
     INDEX_EE_FORCE_Z,
 )
 from legged_gym.utils import task_registry
-from legged_gym.utils.helpers import class_to_dict, get_load_path
+from legged_gym.utils.helpers import class_to_dict, get_load_path, print_env_control_gains
 from legged_gym.utils.isaacgym_utils import sphere2cart
 
 
@@ -1044,6 +1044,7 @@ def run_evaluation(args):
         env_cfg.terrain.height = [0.0, 0.0]
 
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
+    print_env_control_gains(env)
     obs = env.get_observations()
 
     train_cfg.runner.resume = True

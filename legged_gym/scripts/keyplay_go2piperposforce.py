@@ -7,6 +7,7 @@ sys.path.append(unitree_rl_gym_path)
 import isaacgym
 from legged_gym.envs import *
 from legged_gym.utils import get_args, task_registry
+from legged_gym.utils.helpers import print_env_control_gains
 
 
 PRINT_EVERY_STEPS = 30
@@ -68,6 +69,7 @@ def keyplay(args):
         env_cfg.terrain.height = [0.0, 0.0]
 
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
+    print_env_control_gains(env)
     obs = env.get_observations()
 
     train_cfg.runner.resume = True

@@ -94,6 +94,41 @@ def get_load_path(root, load_run=-1, checkpoint=-1):
     load_path = os.path.join(load_run, model)
     return load_path
 
+
+def format_env_control_gains(env):
+    lines = ["[config] active joint control gains"]
+
+    torque_count = int(getattr(env, "num_torques", 0))
+    dof_names = list(getattr(env, "dof_names", []))
+
+    p_gains = getattr(env, "p_gains", None)
+    d_gains = getattr(env, "d_gains", None)
+    if p_gains is not None and d_gains is not None and torque_count > 0:
+        lines.append("  policy-controlled joints:")
+        for i in range(min(torque_count, len(dof_names))):
+            kp = float(p_gains[i].item() if hasattr(p_gains[i], "item") else p_gains[i])
+            kd = float(d_gains[i].item() if hasattr(d_gains[i], "item") else d_gains[i])
+            lines.append(f"    {dof_names[i]}: kp={kp}, kd={kd}")
+
+    gripper_p_gains = getattr(env, "gripper_p_gains", None)
+    gripper_d_gains = getattr(env, "gripper_d_gains", None)
+    if gripper_p_gains is not None and gripper_d_gains is not None:
+        gripper_count = len(gripper_p_gains)
+        if gripper_count > 0:
+            lines.append("  fixed-PD joints:")
+            for i in range(gripper_count):
+                dof_idx = torque_count + i
+                joint_name = dof_names[dof_idx] if dof_idx < len(dof_names) else f"gripper_joint_{i}"
+                kp = float(gripper_p_gains[i].item() if hasattr(gripper_p_gains[i], "item") else gripper_p_gains[i])
+                kd = float(gripper_d_gains[i].item() if hasattr(gripper_d_gains[i], "item") else gripper_d_gains[i])
+                lines.append(f"    {joint_name}: kp={kp}, kd={kd}")
+
+    return "\n".join(lines)
+
+
+def print_env_control_gains(env):
+    print(format_env_control_gains(env))
+
 def update_cfg_from_args(env_cfg, cfg_train, args):
     # seed
     if env_cfg is not None:

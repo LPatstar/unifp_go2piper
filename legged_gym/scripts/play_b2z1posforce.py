@@ -9,7 +9,7 @@ import re
 import isaacgym
 from legged_gym.envs import *
 from legged_gym.utils import  get_args, export_policy_as_jit, task_registry, Logger
-from legged_gym.utils.helpers import get_load_path
+from legged_gym.utils.helpers import get_load_path, print_env_control_gains
 
 import numpy as np
 import torch
@@ -160,9 +160,10 @@ def play(args):
 
     if args.flat_terrain:
         env_cfg.terrain.height = [0.0, 0.0]
-    
+
     # prepare environment
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
+    print_env_control_gains(env)
     obs = env.get_observations()
     # load policy
     train_cfg.runner.resume = True
