@@ -140,6 +140,17 @@ class Go2PiperPosForceRoughCfg(B2Z1PosForceRoughCfg):
     class rewards(B2Z1PosForceRoughCfg.rewards):
         base_height_target = 0.35
 
+        class scales(B2Z1PosForceRoughCfg.rewards.scales):
+            # Keep the proven base/yaw and hybrid updates, but recover the
+            # stronger leg/action regularization after tuned6 regressed.
+            tracking_lin_vel_force_world = 2.5
+            tracking_ang_vel = 1.3
+            base_height = -1.2
+            ang_vel_xy = -0.012
+            tracking_ee_force_world = 2.3
+            ref_dof_leg = 1.0
+            action_rate = -0.02
+
 
 class Go2PiperPosForceRoughCfgPPO(B2Z1PosForceRoughCfgPPO):
     class runner(B2Z1PosForceRoughCfgPPO.runner):
