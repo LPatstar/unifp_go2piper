@@ -94,27 +94,27 @@ class Go2PiperPosForceRoughCfg(B2Z1PosForceRoughCfg):
             "hip": 40.0,
             "thigh": 40.0,
             "calf": 40.0,
-            "piper_joint1": 80.0,
-            "piper_joint2": 80.0,
-            "piper_joint3": 80.0,
-            "piper_joint4": 80.0,
-            "piper_joint5": 80.0,
-            "piper_joint6": 80.0,
-            "piper_joint7": 400.0,
-            "piper_joint8": 400.0,
+            "piper_joint1": 10.0,
+            "piper_joint2": 10.0,
+            "piper_joint3": 10.0,
+            "piper_joint4": 10.0,
+            "piper_joint5": 10.0,
+            "piper_joint6": 10.0,
+            "piper_joint7": 10.0,
+            "piper_joint8": 10.0,
         }
         damping = {
             "hip": 1.0,
             "thigh": 1.0,
             "calf": 1.0,
-            "piper_joint1": 5.0,
-            "piper_joint2": 5.0,
-            "piper_joint3": 5.0,
-            "piper_joint4": 5.0,
-            "piper_joint5": 5.0,
-            "piper_joint6": 5.0,
-            "piper_joint7": 5.0,
-            "piper_joint8": 5.0,
+            "piper_joint1": 1.5,
+            "piper_joint2": 1.5,
+            "piper_joint3": 1.5,
+            "piper_joint4": 1.5,
+            "piper_joint5": 1.5,
+            "piper_joint6": 1.5,
+            "piper_joint7": 1.5,
+            "piper_joint8": 1.5,
         }
 
     class arm(B2Z1PosForceRoughCfg.arm):
@@ -139,6 +139,17 @@ class Go2PiperPosForceRoughCfg(B2Z1PosForceRoughCfg):
 
     class rewards(B2Z1PosForceRoughCfg.rewards):
         base_height_target = 0.35
+
+        class scales(B2Z1PosForceRoughCfg.rewards.scales):
+            # Keep the proven base/yaw and hybrid updates, but recover the
+            # stronger leg/action regularization after tuned6 regressed.
+            tracking_lin_vel_force_world = 2.5
+            tracking_ang_vel = 1.3
+            base_height = -1.2
+            ang_vel_xy = -0.012
+            tracking_ee_force_world = 2.3
+            ref_dof_leg = 1.0
+            action_rate = -0.02
 
 
 class Go2PiperPosForceRoughCfgPPO(B2Z1PosForceRoughCfgPPO):
