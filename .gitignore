@@ -19,3 +19,6 @@ eval_reports/
 wandb_exports/
 tuning_records/*
 !tuning_records/README.md
+play_draws/
+play_torques/
+analysis/

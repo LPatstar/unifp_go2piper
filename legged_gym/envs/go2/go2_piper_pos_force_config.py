@@ -87,7 +87,7 @@ class Go2PiperPosForceRoughCfg(B2Z1PosForceRoughCfg):
         max_push_force_xyz_base_cmd = [-10, 10]
         max_push_force_xyz_base_ext = [-10, 10]
         gripper_force_kp_range = [200., 200.]
-        base_force_kd_range = [30.0, 30.0]
+        base_force_kd_range = [200.0, 200.0]
 
     class control(B2Z1PosForceRoughCfg.control):
         stiffness = {
