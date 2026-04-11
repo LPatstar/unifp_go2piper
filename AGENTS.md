@@ -44,6 +44,12 @@ cd legged_gym/scripts
 python keyplay_go2piperposforce.py --task=go2_piper_pos_force --load_run=<run_name>
 ```
 
+Keyboard teleop with draw export:
+```bash
+cd legged_gym/scripts
+python keyplay_go2piperposforce.py --task=go2_piper_pos_force --load_run=<run_name> --draw
+```
+
 Automated evaluation:
 ```bash
 cd legged_gym/scripts
@@ -95,7 +101,7 @@ Task registration:
 - `train_go2piperposforce.py` delegates to the shared B2/Z1 training implementation and forces `args.task = "go2_piper_pos_force"` when not provided.
 - `play_go2piperposforce.py` delegates to the shared play implementation and enables force visualization / play-side command-force behavior through module flags.
 - `play_go2piperposforce.py --draw` runs a short rollout, saves joint command-vs-actual plots for one front-left leg and the task-relevant arm joints, then exits. The shared play script auto-resolves the correct arm joint names for Go2+Piper and B2+Z1.
-- `keyplay_go2piperposforce.py` creates a single-env teleop setup, disables most randomization, and relies on viewer keyboard events for command updates.
+- `keyplay_go2piperposforce.py` creates a single-env teleop setup, disables most randomization, and relies on viewer keyboard events for command updates. In `--draw` mode it records joint command-vs-actual traces and uses `X` to save plots and exit.
 - `eval_go2piperposforce.py` is the main reproducible checkpoint benchmark. Prefer it over ad hoc `play` sessions when comparing runs.
 - `play_go2piperposforce.py`, `keyplay_go2piperposforce.py`, and `eval_go2piperposforce.py` all use checkpoint-resume loading. If `--load_run` and `--checkpoint` are omitted, the shared loader resolves to the latest run directory and then the latest saved `model_*.pt` checkpoint inside it.
 
@@ -123,6 +129,7 @@ Task registration:
   - `legged_gym/scripts/keyplay_go2piperposforce.py`
   - viewer-event handling inside `legged_gym/envs/b2/legged_robot_b2z1_pos_force.py`
 - Numeric viewer hotkeys are disabled in key-command mode to avoid collisions with numpad EE controls.
+- In both ordinary keyplay and `keyplay --draw`, `V` toggles viewer sync. `X` is the dedicated exit key, and in `keyplay --draw` it saves plots before exiting.
 
 ## Evaluation Notes
 
@@ -131,6 +138,7 @@ Task registration:
 - `summary.json` is the machine-readable artifact and `summary.md` is the human-readable report.
 - The report section named `Runtime Quality` summarizes runtime stability / posture / contact cleanliness / slip / smoothness.
 - `Overall` is the weighted benchmark total, not the same quantity as `Runtime Quality`.
+- `fetch_wandb_data.py --sync` keeps the normal compact local export and additionally creates a new `*_tb_sync` WandB run from the local TensorBoard event file so online charts use the real iteration-aligned axis.
 
 ## Working Rules For Future Changes
 
@@ -163,3 +171,146 @@ Do not commit these local or generated artifacts:
   - `eval` for reproducible checkpoint comparison
 - Do not first attempt Isaac Gym runtime commands in the default sandbox when the task clearly needs real execution. For `play`, `keyplay`, `eval`, or other commands that rely on GPU access, Isaac Gym native bindings, viewer access, or writable PyTorch extension caches such as `~/.cache/torch_extensions`, request escalated execution immediately instead of failing once in the sandbox and retrying afterward.
 - If Isaac Gym is unavailable, state that runtime validation could not be executed rather than guessing.
+
+## Persistent 3-Subagent Tuning Pattern
+
+This repository now has a standing shorthand workflow:
+
+- If the user says:
+  - `根据3subagents范式进行一轮新的调参`
+  - or equivalent wording about `3 subagents`
+- interpret that as the following required collaboration pattern unless the user explicitly overrides part of it.
+
+### Scope Of The Pattern
+
+This pattern is used not only for narrow reward tuning, but also for broader:
+
+- diagnosis
+- mechanism analysis
+- training-result review
+- transferability analysis
+- tuning + small code/config changes
+
+In other words, `3subagents范式` means a structured evidence-driven multi-agent workflow, not only “change one reward number”.
+
+### Required Up-Front Reading
+
+Before any diagnosis or modification, all participating agents should first read and absorb at least:
+
+- `AGENTS.md`
+- `README.md`
+- `GO2_PIPER_TUNING_REQUIREMENTS.md`
+- `GO2_PIPER_EVAL_METRICS.md`
+- `GO2_PIPER_CONFIG_REVIEW.md`
+- the latest relevant root-level analysis md files
+- the latest relevant files under `tuning_records/`
+
+When a specific analysis md is named by the user, treat it as a primary input rather than a light reference.
+
+### Default Agent Roles
+
+Unless the user explicitly reassigns them, use exactly 3 agents with this meaning:
+
+- Agent 1: primary diagnosis and final integration
+  - build the first evidence chain
+  - propose the first version of the tuning / modification plan
+  - after feedback, integrate accepted comments into the final single output
+- Agent 2: strict review and error correction
+  - challenge Agent 1
+  - look for misread docs, weak evidence, causality errors, bad parameter direction, missing risks, and spec violations
+- Agent 3: supplemental diagnosis and expansion
+  - look for missed mechanisms, deeper root causes, additional parameters, training-setting issues, code-path issues, and high-risk but worth-recording ideas
+
+### Required Execution Order
+
+The workflow is sequential, not parallel debate from the start:
+
+1. Agent 1 forms the first diagnosis and first proposal.
+2. Agent 2 reviews Agent 1 and points out problems.
+3. Agent 3 supplements with additional diagnosis and alternatives.
+4. The main agent integrates the three threads and produces the single final result.
+
+Do not collapse this into one blended opinion.
+The final output should clearly state:
+
+- what Agent 1 first thought
+- what Agent 2 corrected or rejected
+- what Agent 3 added
+- what was finally accepted
+- what was not accepted, and why
+
+### Evidence Standard
+
+All three agents should ground their reasoning in available evidence first:
+
+- `eval_reports/.../summary.json`
+- `wandb_exports/.../ai_ready.json`
+- `play_draws/...`
+- relevant config and runtime code
+- prior tuning records
+- prior root-level analysis notes
+
+Prefer existing artifacts when available.
+If the user explicitly says not to rerun the latest `eval` or `play`, do not rerun them just to complete the ritual; rely on current artifacts and state that constraint clearly.
+
+### Constraint Mode Switch
+
+There are now two standing modes for future rounds:
+
+1. Constrained tuning mode
+   - Triggered when the user says things like:
+     - `遵循调参文档约束`
+     - `按调参文档要求`
+     - or equivalent wording
+   - In this mode:
+     - use `GO2_PIPER_TUNING_REQUIREMENTS.md` as an actual constraint document
+     - keep the usual reward-first stance
+     - do not directly modify user-controlled physical embodiment parameters unless the user explicitly asks
+     - still use the 3-subagent workflow above
+
+2. Unconstrained analysis/tuning mode
+   - Triggered when the user says things like:
+     - `不受调参文档约束`
+     - `这次不受 tuning requirements 限制`
+     - or equivalent wording
+   - In this mode:
+     - still read `GO2_PIPER_TUNING_REQUIREMENTS.md` for methodology, comparison habits, and output structure
+     - but do not treat its parameter-scope restrictions as binding
+     - any reward/config/mechanism/code-path change may be considered if justified by evidence
+
+If the user does not specify, follow the wording of the request:
+
+- if they ask for standard tuning, assume constrained mode
+- if they emphasize broader mechanism fixing or say the document is only reference, use unconstrained mode
+
+### Output Expectations Under This Pattern
+
+When the task is a true tuning round:
+
+- keep exactly one final tuning record for the round
+- update that one file rather than creating many iterative variants
+- write the tuning record in Chinese
+- include:
+  - key observed phenomena
+  - cause analysis
+  - exact implemented changes
+  - evidence used
+  - Agent 2 / Agent 3 feedback absorption
+  - final conclusion
+  - bold ideas not implemented
+  - physical/high-risk suggestions not implemented
+
+When the task is broader analysis rather than a tuning round:
+
+- a root-level analysis md is acceptable
+- still preserve the same evidence chain and multi-agent structure
+
+### Practical Interpretation Notes
+
+- Do not mechanically chase the currently lowest benchmark case if a more important newly introduced mechanism problem exists.
+- Separate:
+  - true bottlenecks
+  - metric blind spots
+  - task-definition knobs
+  - deployment transferability risks
+- If a proposed parameter changes both task definition and controller behavior, call that out explicitly; do not present it as a clean one-dimensional fix.

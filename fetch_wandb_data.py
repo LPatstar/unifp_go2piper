@@ -53,6 +53,18 @@ def parse_args():
         default=1000,
         help="Keep one history row every N training iterations. Default: 1000.",
     )
+    parser.add_argument(
+        "--sync",
+        action="store_true",
+        default=False,
+        help="Also sync the selected local TensorBoard run back to WandB as a new *_tb_sync run with correct iteration-aligned steps.",
+    )
+    parser.add_argument(
+        "--no_fetch",
+        action="store_true",
+        default=False,
+        help="Skip local export file generation. If used with --sync, only the WandB sync is performed.",
+    )
     return parser.parse_args()
 
 
@@ -328,6 +340,23 @@ def load_tensorboard_event_accumulator(local_run_dir: str):
     return accumulator
 
 
+def tensorboard_iteration_scalar_tags(accumulator, allowed_keys: Optional[List[str]] = None, use_all_scalar_tags: bool = False):
+    scalar_tags = set(accumulator.Tags().get("scalars", []))
+    if not scalar_tags:
+        return [], []
+
+    if use_all_scalar_tags or not allowed_keys:
+        iteration_keys = sorted(key for key in scalar_tags if not key.endswith(TIME_AXIS_SUFFIX))
+        ignored_time_keys = sorted(key for key in scalar_tags if key.endswith(TIME_AXIS_SUFFIX))
+        return iteration_keys, ignored_time_keys
+
+    iteration_keys = build_iteration_history_keys(allowed_keys)
+    skipped_time_keys = [key for key in build_metric_history_keys(allowed_keys) if key.endswith(TIME_AXIS_SUFFIX)]
+    available_time_keys = [key for key in skipped_time_keys if key in scalar_tags]
+    available_iteration_keys = [key for key in iteration_keys if key in scalar_tags]
+    return available_iteration_keys, available_time_keys
+
+
 def scalar_event_value(event):
     if hasattr(event, "value"):
         return event.value
@@ -380,19 +409,16 @@ def merge_scalar_events(events_by_key, stride: int):
     return sampled_rows
 
 
-def fetch_history_rows_from_tensorboard(local_run_dir: str, allowed_keys: List[str], stride: int):
+def fetch_history_rows_from_tensorboard(local_run_dir: str, allowed_keys: Optional[List[str]], stride: int, use_all_scalar_tags: bool = False):
     accumulator = load_tensorboard_event_accumulator(local_run_dir)
     if accumulator is None:
         return None
 
-    scalar_tags = set(accumulator.Tags().get("scalars", []))
-    if not scalar_tags:
-        return None
-
-    iteration_keys = build_iteration_history_keys(allowed_keys)
-    skipped_time_keys = [key for key in build_metric_history_keys(allowed_keys) if key.endswith(TIME_AXIS_SUFFIX)]
-    available_time_keys = [key for key in skipped_time_keys if key in scalar_tags]
-    available_iteration_keys = [key for key in iteration_keys if key in scalar_tags]
+    available_iteration_keys, available_time_keys = tensorboard_iteration_scalar_tags(
+        accumulator,
+        allowed_keys,
+        use_all_scalar_tags=use_all_scalar_tags,
+    )
 
     if not available_iteration_keys:
         return None
@@ -414,6 +440,107 @@ def fetch_history_rows_from_tensorboard(local_run_dir: str, allowed_keys: List[s
         "source": "local_tensorboard",
         "available_iteration_keys": available_iteration_keys,
         "ignored_time_keys": available_time_keys,
+    }
+
+
+def build_sync_run_name(base_name: str):
+    if not base_name:
+        base_name = "tensorboard_sync"
+    if base_name.endswith("_tb_sync"):
+        return base_name
+    return f"{base_name}_tb_sync"
+
+
+def sync_tensorboard_history_to_wandb(
+    wandb,
+    entity: str,
+    project: str,
+    local_resolution: dict,
+    base_run_name: str,
+    config_payload: dict,
+    summary_payload: dict,
+):
+    if local_resolution is None:
+        raise SystemExit("`--sync` requires a local run under `logs/` so the TensorBoard event file can be read.")
+
+    sync_history_bundle = fetch_history_rows_from_tensorboard(
+        local_resolution["local_run_dir"],
+        allowed_keys=None,
+        stride=1,
+        use_all_scalar_tags=True,
+    )
+    if sync_history_bundle is None:
+        raise SystemExit(
+            f"Could not load local TensorBoard iteration history for sync from `{local_resolution['local_run_dir']}`."
+        )
+
+    history_rows = sync_history_bundle["history"]
+    if not history_rows:
+        raise SystemExit("TensorBoard sync requested, but no iteration-aligned scalar rows were found.")
+
+    sync_run_name = build_sync_run_name(base_run_name)
+    log_progress(
+        f"Syncing {len(history_rows)} full TensorBoard iteration rows to WandB as `{sync_run_name}` "
+        f"under `{entity}/{project}`."
+    )
+
+    sync_config = json_safe(dict(config_payload))
+    sync_config.update(
+        {
+            "tb_sync_source": "local_tensorboard",
+            "tb_sync_local_run_dir": local_resolution["local_run_dir"],
+            "tb_sync_original_run_name": base_run_name,
+        }
+    )
+
+    sync_run = wandb.init(
+        project=project,
+        entity=entity,
+        name=sync_run_name,
+        config=sync_config,
+        tags=["tb_sync", "tensorboard_sync", "iteration_axis"],
+        resume="never",
+    )
+    sync_run.define_metric("global_step")
+    sync_run.define_metric("*", step_metric="global_step")
+
+    total_rows = len(history_rows)
+    for idx, row in enumerate(history_rows, start=1):
+        step = int(row["global_step"])
+        payload = {
+            key: value
+            for key, value in row.items()
+            if key not in {"_step", "_runtime", "_timestamp"} and value is not None
+        }
+        payload["global_step"] = step
+        sync_run.log(payload, step=step)
+        if idx == 1 or idx == total_rows or idx % 500 == 0:
+            log_progress(f"WandB sync progress: {idx}/{total_rows} rows logged.")
+
+    clean_summary = json_safe(
+        {str(k): v for k, v in summary_payload.items() if not should_drop_summary_key(str(k))}
+    )
+    if clean_summary:
+        sync_run.summary.update(clean_summary)
+    sync_run.summary["tb_sync_local_run_dir"] = local_resolution["local_run_dir"]
+    sync_run.summary["tb_sync_original_run_name"] = base_run_name
+    sync_run.summary["tb_sync_history_row_count"] = total_rows
+    sync_run.summary["tb_sync_iteration_key_count"] = len(sync_history_bundle["available_iteration_keys"])
+
+    sync_url = getattr(sync_run, "url", None)
+    sync_id = getattr(sync_run, "id", None)
+    sync_run.finish()
+    log_progress(f"WandB TensorBoard sync complete: {sync_run_name}")
+
+    return {
+        "enabled": True,
+        "run_name": sync_run_name,
+        "run_id": sync_id,
+        "run_url": sync_url,
+        "history_source": sync_history_bundle["source"],
+        "history_row_count": total_rows,
+        "iteration_key_count": len(sync_history_bundle["available_iteration_keys"]),
+        "ignored_time_axis_keys": sync_history_bundle["ignored_time_keys"],
     }
 
 
@@ -510,7 +637,10 @@ def safe_dir_name(name: str):
 
 def main():
     args = parse_args()
-    log_progress(f"Starting export with args: run_name={args.run_name}, project={args.project}, stride={args.history_stride}")
+    log_progress(
+        f"Starting export with args: run_name={args.run_name}, project={args.project}, "
+        f"stride={args.history_stride}, sync={args.sync}, no_fetch={args.no_fetch}"
+    )
     wandb = load_wandb()
     log_progress("Imported wandb successfully.")
 
@@ -562,15 +692,18 @@ def main():
         }
     if target_names:
         run = find_run_by_name(api, project_path, target_names)
-        if run is None:
+        if run is None and not (args.sync and local_resolution is not None):
             raise SystemExit(
                 f"Could not find a WandB run under `{project_path}` matching any of: {target_names}"
             )
-    log_progress(f"Resolved WandB run: {run.name} (id={getattr(run, 'id', None)})")
+    if run is not None:
+        log_progress(f"Resolved WandB run: {run.name} (id={getattr(run, 'id', None)})")
+    else:
+        log_progress("No existing WandB run matched. Continuing with local TensorBoard context for export/sync.")
 
     log_progress("Fetching summary/config payloads.")
-    summary_payload = dict(getattr(run, "summary", {}))
-    config_payload = dict(getattr(run, "config", {}))
+    summary_payload = dict(getattr(run, "summary", {})) if run is not None else {}
+    config_payload = dict(getattr(run, "config", {})) if run is not None else {}
     allowed_history_keys = build_allowed_history_keys(summary_payload)
     log_progress(f"Keeping {len(allowed_history_keys)} history keys after summary-based filtering.")
     history_bundle = None
@@ -590,21 +723,17 @@ def main():
         history_bundle = fetch_history_rows(run, allowed_history_keys, args.history_stride)
     history_rows = history_bundle["history"]
 
-    output_dir = Path(args.output_dir).expanduser().resolve()
-    run_output_dir = output_dir / safe_dir_name(run.name)
-    run_output_dir.mkdir(parents=True, exist_ok=True)
-    log_progress(f"Writing exported files to {run_output_dir}")
-
+    output_run_name = getattr(run, "name", None) or local_resolution["wandb_run_name"]
     run_metadata = {
         "entity": entity,
         "project": args.project,
         "project_path": project_path,
-        "run_id": getattr(run, "id", None),
-        "run_name": getattr(run, "name", None),
-        "run_display_name": getattr(run, "display_name", None),
-        "run_url": getattr(run, "url", None),
-        "run_state": getattr(run, "state", None),
-        "created_at": getattr(run, "created_at", None),
+        "run_id": getattr(run, "id", None) if run is not None else None,
+        "run_name": getattr(run, "name", None) if run is not None else output_run_name,
+        "run_display_name": getattr(run, "display_name", None) if run is not None else None,
+        "run_url": getattr(run, "url", None) if run is not None else None,
+        "run_state": getattr(run, "state", None) if run is not None else None,
+        "created_at": getattr(run, "created_at", None) if run is not None else None,
         "resolution": resolution_info,
         "history_stride": args.history_stride,
         "history_keys": history_bundle["available_iteration_keys"],
@@ -615,29 +744,53 @@ def main():
         "exported_at": datetime.now().isoformat(),
     }
 
-    write_json(run_output_dir / "run_info.json", run_metadata)
-    write_json(run_output_dir / "summary.json", summary_payload)
-    write_json(run_output_dir / "config.json", config_payload)
-    write_history_jsonl(run_output_dir / "history.jsonl", history_rows)
-    write_history_csv(run_output_dir / "history.csv", history_rows)
-    write_json(
-        run_output_dir / "ai_ready.json",
-        {
-            "run_info": run_metadata,
-            "summary": summary_payload,
-            "config": config_payload,
-            "history": history_rows,
-        },
-    )
-    log_progress("All export files written successfully.")
+    if args.sync:
+        sync_result = sync_tensorboard_history_to_wandb(
+            wandb=wandb,
+            entity=entity,
+            project=args.project,
+            local_resolution=local_resolution,
+            base_run_name=output_run_name,
+            config_payload=config_payload,
+            summary_payload=summary_payload,
+        )
+        run_metadata["wandb_sync"] = sync_result
 
-    print(f"Resolved WandB run : {run.name}")
+    run_output_dir = None
+    if not args.no_fetch:
+        output_dir = Path(args.output_dir).expanduser().resolve()
+        run_output_dir = output_dir / safe_dir_name(output_run_name)
+        run_output_dir.mkdir(parents=True, exist_ok=True)
+        log_progress(f"Writing exported files to {run_output_dir}")
+
+        write_json(run_output_dir / "run_info.json", run_metadata)
+        write_json(run_output_dir / "summary.json", summary_payload)
+        write_json(run_output_dir / "config.json", config_payload)
+        write_history_jsonl(run_output_dir / "history.jsonl", history_rows)
+        write_history_csv(run_output_dir / "history.csv", history_rows)
+        write_json(
+            run_output_dir / "ai_ready.json",
+            {
+                "run_info": run_metadata,
+                "summary": summary_payload,
+                "config": config_payload,
+                "history": history_rows,
+            },
+        )
+        log_progress("All export files written successfully.")
+    else:
+        log_progress("Local fetch/export skipped because --no_fetch was set.")
+
+    print(f"Resolved WandB run : {output_run_name}")
     print(f"Project path       : {project_path}")
-    print(f"Output directory   : {run_output_dir}")
+    print(f"Output directory   : {run_output_dir if run_output_dir is not None else '<skipped by --no_fetch>'}")
     print(f"History source     : {history_bundle['source']}")
     print(f"History rows       : {len(history_rows)} (stride={args.history_stride})")
     print(f"History keys       : {len(history_bundle['available_iteration_keys'])} exported on iteration axis")
     print(f"Ignored /time keys : {len(history_bundle['ignored_time_keys'])}")
+    if args.sync:
+        print(f"Synced WandB run   : {run_metadata['wandb_sync']['run_name']}")
+        print(f"Sync row count     : {run_metadata['wandb_sync']['history_row_count']}")
 
 
 if __name__ == "__main__":

@@ -113,6 +113,9 @@ Use the keyplay script to manually command the Go2+Piper policy from the viewer 
 ```bash
 # Go2+Piper keyboard-controlled evaluation
 python keyplay_go2piperposforce.py --task=go2_piper_pos_force --load_run=<run_name>
+
+# Keyplay with draw export; press V in the viewer to save plots and exit
+python keyplay_go2piperposforce.py --task=go2_piper_pos_force --load_run=<run_name> --draw
 ```
 
 This mode keeps policy inference running, but replaces the usual randomized command stream with viewer keyboard input:
@@ -133,10 +136,18 @@ This mode keeps policy inference running, but replaces the usual randomized comm
   - `R`: reset base motion commands to zero
   - Numpad `5`: reset EE target to the home position
   - `N`: reset force commands to zero
+- Exit shortcut:
+  - `X`: exit keyplay
 - Viewer controls:
   - `F`: toggle follow camera
   - `V`: toggle viewer sync
   - `SPACE`: pause/unpause
+
+When `--draw` is enabled in keyplay:
+
+- Joint command/actual trajectories are recorded continuously while you inspect the policy.
+- Press `X` to save the leg and arm plots under `play_draws/` and exit the session.
+- In this draw mode, `V` still toggles viewer sync.
 
 Notes:
 
@@ -182,6 +193,12 @@ python fetch_wandb_data.py
 
 # Export a specific run by name
 python fetch_wandb_data.py --run_name=Apr03_22-02-52_go2_piper_tuned2
+
+# Export locally and also sync the full TensorBoard iteration history back to WandB
+python fetch_wandb_data.py --run_name=Apr03_22-02-52_go2_piper_tuned2 --sync
+
+# Skip local export files and only sync the run back to WandB
+python fetch_wandb_data.py --run_name=Apr03_22-02-52_go2_piper_tuned2 --no_fetch --sync
 ```
 
 Useful options:
@@ -190,6 +207,10 @@ Useful options:
   Target a specific training run. The script accepts an exact WandB run name, a local `logs/...` directory name, or the short local `run_name` suffix.
 - `--history_stride <N>`
   Downsample WandB history during export. By default the script keeps one row every `1000` training iterations (`global_step`) and also keeps the final row.
+- `--sync`
+  In addition to the normal local export, also create a new WandB run named `*_tb_sync` from the local TensorBoard event file so the online charts use the real iteration-aligned step axis.
+- `--no_fetch`
+  Skip local file export. If used together with `--sync`, the script only performs the WandB sync. If used without `--sync`, the script resolves the run and exits without writing export files.
 - `--entity <entity>`
   Override the WandB entity/team if it cannot be inferred automatically from the current WandB login state.
 - `--project <project>`
@@ -218,6 +239,13 @@ Notes:
 - When the matching local TensorBoard event file is available, the script prefers it over WandB history so the exported `history` follows the real training-step axis instead of WandB's internal event indexing.
 - Before downsampling, scalar rows from the same training iteration are merged into a single record, and the export is filtered by the keys that appear in `summary.json`, so repeated timestamp lines and obvious low-value system metrics such as GPU fan speed are skipped.
 - Metrics logged only on the TensorBoard `/time` axis are intentionally excluded so `ai_ready.json` stays focused on training-iteration data that is useful for tuning.
+- If `--sync` is enabled, the script additionally uploads the full local TensorBoard iteration history to a new WandB run with the suffix `*_tb_sync`. This does not rewrite the original online run.
+- If `--no_fetch` is enabled, the compact local export files are skipped.
+- Combined behavior:
+  - no flags: fetch/export only
+  - `--sync`: fetch/export + WandB sync
+  - `--no_fetch --sync`: WandB sync only
+  - `--no_fetch` alone: resolve/read only, then exit without writing local export files
 
 ### Parameter Configuration
 

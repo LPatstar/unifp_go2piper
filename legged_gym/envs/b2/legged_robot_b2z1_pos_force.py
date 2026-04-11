@@ -68,6 +68,7 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
         self.key_command_mode = getattr(self.cfg.env, "key_command_mode", False)
         self.enable_numeric_viewer_hotkeys = not self.key_command_mode
         self.enable_random_force_events = not self.key_command_mode
+        self.key_exit_requested = False
         if self.debug_curve:
             self.FL_joint_index = 2
             self.FR_joint_index = 5
@@ -1974,6 +1975,7 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
     def subscribe_viewer_keyboard_events(self):
         super().subscribe_viewer_keyboard_events()
         if self.key_command_mode:
+            self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_X, "key_exit")
             self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_W, "key_forward")
             self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_S, "key_backward")
             self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_A, "key_left")
@@ -2013,7 +2015,9 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
             return
 
         if self.key_command_mode:
-            if evt.action == "key_forward":
+            if evt.action == "key_exit":
+                self.key_exit_requested = True
+            elif evt.action == "key_forward":
                 self.commands[:, 0] = torch.clamp(self.commands[:, 0] + self.key_lin_vel_step, self.command_ranges["lin_vel_x"][0], self.command_ranges["lin_vel_x"][1])
             elif evt.action == "key_backward":
                 self.commands[:, 0] = torch.clamp(self.commands[:, 0] - self.key_lin_vel_step, self.command_ranges["lin_vel_x"][0], self.command_ranges["lin_vel_x"][1])

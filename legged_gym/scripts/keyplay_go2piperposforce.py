@@ -5,7 +5,9 @@ unitree_rl_gym_path = os.path.abspath(__file__ + "../../../../")
 sys.path.append(unitree_rl_gym_path)
 
 import isaacgym
+
 from legged_gym.envs import *
+import legged_gym.scripts.play_b2z1posforce as play_impl
 from legged_gym.utils import get_args, task_registry
 from legged_gym.utils.helpers import print_env_control_gains
 
@@ -13,7 +15,7 @@ from legged_gym.utils.helpers import print_env_control_gains
 PRINT_EVERY_STEPS = 30
 
 
-def print_key_help():
+def print_key_help(draw_mode=False):
     print("Keyplay controls for go2_piper:")
     print("  W/S : forward velocity +/-")
     print("  A/D : lateral velocity +/-")
@@ -27,6 +29,10 @@ def print_key_help():
     print("  R   : reset base motion commands to zero")
     print("  Numpad 5   : reset EE target to home")
     print("  N   : reset force commands to zero")
+    if draw_mode:
+        print("  X : save draw plots and exit")
+    else:
+        print("  X : exit keyplay")
     print("  F : toggle follow camera")
     print("  V : toggle viewer sync")
     print("  SPACE : pause")
@@ -48,6 +54,7 @@ def format_status(env):
 
 def keyplay(args):
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
+    draw_mode = bool(getattr(args, "draw", False))
 
     env_cfg.env.num_envs = min(env_cfg.env.num_envs, 1)
     env_cfg.env.teleop_mode = True
@@ -82,7 +89,18 @@ def keyplay(args):
     env.enable_random_force_events = False
     env._update_key_command_ee_goal()
 
-    print_key_help()
+    if draw_mode:
+        draw_leg_joint_names = play_impl.resolve_draw_leg_joint_names(env)
+        draw_arm_joint_names = play_impl.resolve_draw_arm_joint_names(env)
+        leg_joint_indices = play_impl.collect_joint_indices(env, draw_leg_joint_names)
+        arm_joint_indices = play_impl.collect_joint_indices(env, draw_arm_joint_names)
+        draw_time_axis = []
+        leg_cmd_series = {name: [] for name in draw_leg_joint_names}
+        leg_act_series = {name: [] for name in draw_leg_joint_names}
+        arm_cmd_series = {name: [] for name in draw_arm_joint_names}
+        arm_act_series = {name: [] for name in draw_arm_joint_names}
+
+    print_key_help(draw_mode=draw_mode)
     print(format_status(env))
 
     policy_info = {}
@@ -90,12 +108,50 @@ def keyplay(args):
         actions = policy(obs, policy_info)
         obs, rews, dones, infos = env.step(actions.detach())
 
+        if draw_mode:
+            command_targets = play_impl.compute_command_targets(env)
+            actual_dof_pos = env.dof_pos[0].detach().cpu().numpy()
+            draw_time_axis.append((i + 1) * env.dt)
+            for joint_name, joint_idx in zip(draw_leg_joint_names, leg_joint_indices):
+                leg_cmd_series[joint_name].append(float(command_targets[joint_idx]))
+                leg_act_series[joint_name].append(float(actual_dof_pos[joint_idx]))
+            for joint_name, joint_idx in zip(draw_arm_joint_names, arm_joint_indices):
+                arm_cmd_series[joint_name].append(float(command_targets[joint_idx]))
+                arm_act_series[joint_name].append(float(actual_dof_pos[joint_idx]))
+
         if i % PRINT_EVERY_STEPS == 0:
             print(format_status(env))
 
+        if env.key_exit_requested:
+            break
+
+    if draw_mode:
+        model_metadata = play_impl.resolve_model_metadata(train_cfg)
+        output_dir = play_impl.build_draw_output_dir(args, model_metadata)
+        leg_output_path = os.path.join(output_dir, "leg_joint_tracking.png")
+        arm_output_path = os.path.join(output_dir, "arm_joint_tracking.png")
+        play_impl.save_joint_tracking_plot(
+            draw_time_axis,
+            draw_leg_joint_names,
+            leg_cmd_series,
+            leg_act_series,
+            "Front-left Leg Joint Command vs Actual (absolute rad)",
+            leg_output_path,
+        )
+        play_impl.save_joint_tracking_plot(
+            draw_time_axis,
+            draw_arm_joint_names,
+            arm_cmd_series,
+            arm_act_series,
+            "Arm Joint Command vs Actual (absolute rad)",
+            arm_output_path,
+        )
+        print(f"Saved leg tracking plot to: {leg_output_path}")
+        print(f"Saved arm tracking plot to: {arm_output_path}")
+
 
 if __name__ == "__main__":
-    args = get_args()
+    args = get_args(custom_parameters=play_impl.DRAW_JOINT_CUSTOM_PARAMETERS)
     if not getattr(args, "task", None):
         args.task = "go2_piper_pos_force"
     keyplay(args)

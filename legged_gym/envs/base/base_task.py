@@ -78,8 +78,9 @@ class BaseTask():
     def subscribe_viewer_keyboard_events(self):
         self.gym.subscribe_viewer_keyboard_event(
             self.viewer, gymapi.KEY_ESCAPE, "QUIT")
-        self.gym.subscribe_viewer_keyboard_event(
-            self.viewer, gymapi.KEY_V, "toggle_viewer_sync")
+        if not getattr(self, "disable_viewer_sync_hotkey", False):
+            self.gym.subscribe_viewer_keyboard_event(
+                self.viewer, gymapi.KEY_V, "toggle_viewer_sync")
         self.gym.subscribe_viewer_keyboard_event(
             self.viewer, gymapi.KEY_F, "free_cam")
         if getattr(self, "enable_numeric_viewer_hotkeys", True):
