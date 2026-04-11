@@ -94,27 +94,51 @@ class Go2PiperPosForceRoughCfg(B2Z1PosForceRoughCfg):
             "hip": 40.0,
             "thigh": 40.0,
             "calf": 40.0,
-            "piper_joint1": 80.0,
+            "piper_joint1": 40.0,
             "piper_joint2": 80.0,
             "piper_joint3": 80.0,
-            "piper_joint4": 80.0,
+            "piper_joint4": 40.0,
             "piper_joint5": 80.0,
-            "piper_joint6": 80.0,
-            "piper_joint7": 400.0,
-            "piper_joint8": 400.0,
+            "piper_joint6": 40.0,
+            "piper_joint7": 40.0,
+            "piper_joint8": 40.0,
         }
         damping = {
             "hip": 1.0,
             "thigh": 1.0,
             "calf": 1.0,
-            "piper_joint1": 5.0,
-            "piper_joint2": 5.0,
-            "piper_joint3": 5.0,
-            "piper_joint4": 5.0,
-            "piper_joint5": 5.0,
-            "piper_joint6": 5.0,
-            "piper_joint7": 5.0,
-            "piper_joint8": 5.0,
+            "piper_joint1": 3.0,
+            "piper_joint2": 6.0,
+            "piper_joint3": 6.0,
+            "piper_joint4": 3.0,
+            "piper_joint5": 6.0,
+            "piper_joint6": 3.0,
+            "piper_joint7": 3.0,
+            "piper_joint8": 3.0,
+        }
+        # Remap all Piper joints so current stiff PD produces torque close to
+        # the soft-PD plant that made tuned7 successful. Joints 1-5 remap via
+        # policy actions; fixed-PD joints 6-8 remap via their fixed targets.
+        enable_arm_pd_equivalent_action_remap = True
+        arm_pd_remap_old_stiffness = {
+            "piper_joint1": 10.0,
+            "piper_joint2": 10.0,
+            "piper_joint3": 10.0,
+            "piper_joint4": 10.0,
+            "piper_joint5": 10.0,
+            "piper_joint6": 10.0,
+            "piper_joint7": 10.0,
+            "piper_joint8": 10.0,
+        }
+        arm_pd_remap_old_damping = {
+            "piper_joint1": 1.5,
+            "piper_joint2": 1.5,
+            "piper_joint3": 1.5,
+            "piper_joint4": 1.5,
+            "piper_joint5": 1.5,
+            "piper_joint6": 1.5,
+            "piper_joint7": 1.5,
+            "piper_joint8": 1.5,
         }
 
     class arm(B2Z1PosForceRoughCfg.arm):

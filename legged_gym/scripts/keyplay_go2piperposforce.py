@@ -15,7 +15,7 @@ from legged_gym.utils.helpers import print_env_control_gains
 PRINT_EVERY_STEPS = 30
 
 
-def print_key_help(draw_mode=False):
+def print_key_help(draw_mode=False, torque_recording=False):
     print("Keyplay controls for go2_piper:")
     print("  W/S : forward velocity +/-")
     print("  A/D : lateral velocity +/-")
@@ -31,6 +31,8 @@ def print_key_help(draw_mode=False):
     print("  N   : reset force commands to zero")
     if draw_mode:
         print("  X : save draw plots and exit")
+    elif torque_recording:
+        print("  X : save torque record and exit")
     else:
         print("  X : exit keyplay")
     print("  F : toggle follow camera")
@@ -55,6 +57,7 @@ def format_status(env):
 def keyplay(args):
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
     draw_mode = bool(getattr(args, "draw", False))
+    rec_torque = bool(getattr(args, "rec_torque", False))
 
     env_cfg.env.num_envs = min(env_cfg.env.num_envs, 1)
     env_cfg.env.teleop_mode = True
@@ -100,13 +103,17 @@ def keyplay(args):
         arm_cmd_series = {name: [] for name in draw_arm_joint_names}
         arm_act_series = {name: [] for name in draw_arm_joint_names}
 
-    print_key_help(draw_mode=draw_mode)
+    torque_record = play_impl.init_torque_record(env) if rec_torque else None
+
+    print_key_help(draw_mode=draw_mode, torque_recording=rec_torque)
     print(format_status(env))
 
     policy_info = {}
     for i in range(100 * int(env.max_episode_length)):
         actions = policy(obs, policy_info)
         obs, rews, dones, infos = env.step(actions.detach())
+        if torque_record is not None:
+            play_impl.append_torque_record(torque_record, env, i)
 
         if draw_mode:
             command_targets = play_impl.compute_command_targets(env)
@@ -148,6 +155,9 @@ def keyplay(args):
         )
         print(f"Saved leg tracking plot to: {leg_output_path}")
         print(f"Saved arm tracking plot to: {arm_output_path}")
+    if torque_record is not None:
+        model_metadata = play_impl.resolve_model_metadata(train_cfg)
+        play_impl.save_torque_record(torque_record, args, model_metadata)
 
 
 if __name__ == "__main__":

@@ -120,7 +120,8 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
             self.render()
 
         for _ in range(self.cfg.control.decimation):
-            self.torques = self._compute_torques(self.actions)
+            self.control_actions = self._remap_arm_actions_for_pd_equivalent_torque(self.actions)
+            self.torques = self._compute_torques(self.control_actions)
             self.gym.set_dof_actuation_force_tensor(self.sim, gymtorch.unwrap_tensor(self.torques))
             if self.cfg.env.test:
                 elapsed_time = self.gym.get_elapsed_time(self.sim)
@@ -239,6 +240,7 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
         self.last_torques[env_ids] = 0.
         self.last_last_actions[env_ids] = 0.
         self.actions[env_ids] = 0.
+        self.control_actions[env_ids] = 0.
         self.last_actions[env_ids] = 0.
         self.last_rigid_state[env_ids] = 0.
         self.last_dof_vel[env_ids] = 0.
@@ -918,6 +920,57 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
         A = torch.bmm(self.ee_j_eef, j_eef_T) + lmbda[None, ...]
         u = torch.bmm(j_eef_T, torch.linalg.solve(A, dpose))#.view(self.num_envs, 6)
         return u.squeeze(-1)
+
+    def _remap_arm_actions_for_pd_equivalent_torque(self, actions):
+        if not getattr(self, "enable_arm_pd_equivalent_action_remap", False):
+            return actions
+
+        arm_slice = self.arm_dof_slice
+        action_scale = self.cfg.control.action_scale
+        motor_strength = self.motor_strength[:, arm_slice]
+        action_denominator = torch.clamp(motor_strength * action_scale, min=1e-6)
+
+        old_kp = self.arm_pd_remap_old_p_gains.unsqueeze(0)
+        old_kd = self.arm_pd_remap_old_d_gains.unsqueeze(0)
+        new_kp = torch.clamp(self.p_gains[arm_slice], min=1e-6).unsqueeze(0)
+        new_kd = self.d_gains[arm_slice].unsqueeze(0)
+
+        q0 = self.default_dof_pos_wo_gripper[:, arm_slice]
+        q = self.dof_pos_wo_gripper[:, arm_slice]
+        qdot = self.dof_vel_wo_gripper[:, arm_slice]
+
+        q_des_old = q0 + actions[:, arm_slice] * action_denominator
+        tau_old = old_kp * (q_des_old - q) - old_kd * qdot
+        q_des_new = q + (tau_old + new_kd * qdot) / new_kp
+
+        remapped_actions = actions.clone()
+        remapped_actions[:, arm_slice] = (q_des_new - q0) / action_denominator
+        return remapped_actions
+
+    def _get_pd_equivalent_gripper_targets(self):
+        gripper_target_old = self.default_dof_pos[:, self.num_torques:]
+        if not getattr(self, "enable_arm_pd_equivalent_action_remap", False):
+            return gripper_target_old
+
+        old_kp = self.arm_pd_remap_old_gripper_p_gains.unsqueeze(0)
+        old_kd = self.arm_pd_remap_old_gripper_d_gains.unsqueeze(0)
+        new_kp = torch.clamp(self.gripper_p_gains, min=1e-6).unsqueeze(0)
+        new_kd = self.gripper_d_gains.unsqueeze(0)
+
+        gripper_pos = self.dof_pos[:, self.num_torques:]
+        gripper_vel = self.dof_vel[:, self.num_torques:]
+        tau_old = old_kp * (gripper_target_old - gripper_pos) - old_kd * gripper_vel
+        return gripper_pos + (tau_old + new_kd * gripper_vel) / new_kp
+
+    def _resolve_pd_remap_gain(self, gain_cfg, dof_name, default_value):
+        if isinstance(gain_cfg, dict):
+            for gain_name, gain_value in gain_cfg.items():
+                if gain_name in dof_name:
+                    return float(gain_value)
+            return float(default_value)
+        if gain_cfg is None:
+            return float(default_value)
+        return float(gain_cfg)
     
     def _compute_torques(self, actions):
         """ Compute torques from actions.
@@ -936,7 +989,7 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
         default_torques = self.p_gains * (actions_scaled + self.default_dof_pos_wo_gripper - self.dof_pos_wo_gripper) - self.d_gains * self.dof_vel_wo_gripper
         gripper_pos = self.dof_pos[:, self.num_torques:]
         gripper_vel = self.dof_vel[:, self.num_torques:]
-        gripper_target = self.default_dof_pos[:, self.num_torques:]
+        gripper_target = self._get_pd_equivalent_gripper_targets()
         gripper_torque = self.gripper_p_gains.unsqueeze(0) * (gripper_target - gripper_pos) - self.gripper_d_gains.unsqueeze(0) * gripper_vel
 
         torques = torch.cat([default_torques, gripper_torque], dim=-1)
@@ -1540,6 +1593,7 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
         self.p_gains = torch.zeros(self.num_torques, dtype=torch.float, device=self.device, requires_grad=False)
         self.d_gains = torch.zeros(self.num_torques, dtype=torch.float, device=self.device, requires_grad=False)
         self.actions = torch.zeros(self.num_envs, self.num_actions, dtype=torch.float, device=self.device, requires_grad=False)
+        self.control_actions = torch.zeros_like(self.actions)
         self.last_actions = torch.zeros(self.num_envs, self.num_actions, dtype=torch.float, device=self.device, requires_grad=False)
         self.last_last_actions = torch.zeros(self.num_envs, self.num_actions, dtype=torch.float, device=self.device, requires_grad=False)
         self.last_rigid_state = torch.zeros_like(self.rigid_state)
@@ -1614,6 +1668,31 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
                 print(f"PD gain of joint {name} were not defined, setting them to zero")
         self.default_dof_pos = self.default_dof_pos.unsqueeze(0)
         self.default_dof_pos_wo_gripper = self.default_dof_pos[:, :-self.cfg.env.num_gripper_joints]
+
+        self.enable_arm_pd_equivalent_action_remap = bool(getattr(self.cfg.control, "enable_arm_pd_equivalent_action_remap", False))
+        self.arm_pd_remap_old_p_gains = self.p_gains[self.arm_dof_slice].clone()
+        self.arm_pd_remap_old_d_gains = self.d_gains[self.arm_dof_slice].clone()
+        self.arm_pd_remap_old_gripper_p_gains = self.gripper_p_gains.clone()
+        self.arm_pd_remap_old_gripper_d_gains = self.gripper_d_gains.clone()
+        if self.enable_arm_pd_equivalent_action_remap:
+            old_stiffness = getattr(self.cfg.control, "arm_pd_remap_old_stiffness", {})
+            old_damping = getattr(self.cfg.control, "arm_pd_remap_old_damping", {})
+            for local_idx, dof_idx in enumerate(range(self.num_leg_dofs, self.num_torques)):
+                dof_name = self.dof_names[dof_idx]
+                self.arm_pd_remap_old_p_gains[local_idx] = self._resolve_pd_remap_gain(
+                    old_stiffness, dof_name, self.p_gains[dof_idx].item()
+                )
+                self.arm_pd_remap_old_d_gains[local_idx] = self._resolve_pd_remap_gain(
+                    old_damping, dof_name, self.d_gains[dof_idx].item()
+                )
+            for local_idx, dof_idx in enumerate(range(self.num_torques, self.num_torques + self.cfg.env.num_gripper_joints)):
+                dof_name = self.dof_names[dof_idx]
+                self.arm_pd_remap_old_gripper_p_gains[local_idx] = self._resolve_pd_remap_gain(
+                    old_stiffness, dof_name, self.gripper_p_gains[local_idx].item()
+                )
+                self.arm_pd_remap_old_gripper_d_gains[local_idx] = self._resolve_pd_remap_gain(
+                    old_damping, dof_name, self.gripper_d_gains[local_idx].item()
+                )
         
         # gait
         self.gait_indices = torch.zeros(self.num_envs, dtype=torch.float, device=self.device,
@@ -1974,8 +2053,8 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
  
     def subscribe_viewer_keyboard_events(self):
         super().subscribe_viewer_keyboard_events()
+        self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_X, "key_exit")
         if self.key_command_mode:
-            self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_X, "key_exit")
             self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_W, "key_forward")
             self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_S, "key_backward")
             self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_A, "key_left")
@@ -2014,10 +2093,12 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
         if evt.value <= 0:
             return
 
+        if evt.action == "key_exit":
+            self.key_exit_requested = True
+            return
+
         if self.key_command_mode:
-            if evt.action == "key_exit":
-                self.key_exit_requested = True
-            elif evt.action == "key_forward":
+            if evt.action == "key_forward":
                 self.commands[:, 0] = torch.clamp(self.commands[:, 0] + self.key_lin_vel_step, self.command_ranges["lin_vel_x"][0], self.command_ranges["lin_vel_x"][1])
             elif evt.action == "key_backward":
                 self.commands[:, 0] = torch.clamp(self.commands[:, 0] - self.key_lin_vel_step, self.command_ranges["lin_vel_x"][0], self.command_ranges["lin_vel_x"][1])

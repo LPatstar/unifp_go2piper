@@ -24,6 +24,8 @@ DRAW_JOINT_CUSTOM_PARAMETERS = [
     {"name": "--draw", "action": "store_true", "default": False, "help": "Record joint command/actual trajectories for a short play window and save plots."},
     {"name": "--draw_steps", "type": int, "default": 1000, "help": "Number of play steps to record before saving draw plots. Default: 1000."},
     {"name": "--draw_dir", "type": str, "default": "play_draws", "help": "Directory for saved play draw plots. Default: play_draws/."},
+    {"name": "--rec_torque", "action": "store_true", "default": False, "help": "Record Piper joint torques during play/keyplay and save them on exit."},
+    {"name": "--torque_dir", "type": str, "default": "play_torques", "help": "Directory for saved Piper torque records. Default: play_torques/."},
 ]
 PREFERRED_DRAW_LEG_JOINT_GROUPS = [
     ["FL_hip_joint", "FL_thigh_joint", "FL_calf_joint"],
@@ -63,10 +65,14 @@ def resolve_model_metadata(train_cfg):
     }
 
 
-def compute_command_targets(env, actions):
+def compute_command_targets(env, actions=None):
     full_targets = env.default_dof_pos[0].clone()
+    if actions is None:
+        actions = getattr(env, "control_actions", env.actions)
     scaled_actions = actions[0].detach() * env.motor_strength[0] * env.cfg.control.action_scale
     full_targets[:env.num_torques] = scaled_actions + env.default_dof_pos_wo_gripper[0]
+    if hasattr(env, "_get_pd_equivalent_gripper_targets"):
+        full_targets[env.num_torques:] = env._get_pd_equivalent_gripper_targets()[0].detach()
     return full_targets.detach().cpu().numpy()
 
 
@@ -122,6 +128,65 @@ def build_draw_output_dir(args, model_metadata):
     )
     os.makedirs(root, exist_ok=True)
     return root
+
+
+def build_torque_output_dir(args, model_metadata):
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    root = os.path.join(
+        LEGGED_GYM_ROOT_DIR,
+        args.torque_dir,
+        f"{args.task}_{safe_path_component(model_metadata['resolved_run_name'])}_ckpt{safe_path_component(model_metadata['resolved_checkpoint'])}_{timestamp}",
+    )
+    os.makedirs(root, exist_ok=True)
+    return root
+
+
+def resolve_piper_torque_joint_names(env):
+    piper_joint_names = [joint_name for joint_name in env.dof_names if joint_name.startswith("piper_joint")]
+    if piper_joint_names:
+        return piper_joint_names
+    arm_start = int(getattr(env, "num_leg_dofs", 0))
+    return list(env.dof_names[arm_start:])
+
+
+def init_torque_record(env):
+    joint_names = resolve_piper_torque_joint_names(env)
+    joint_indices = collect_joint_indices(env, joint_names)
+    return {
+        "joint_names": joint_names,
+        "joint_indices": joint_indices,
+        "time_s": [],
+        "torque": [],
+    }
+
+
+def append_torque_record(record, env, step_idx):
+    torques = env.torques[0, record["joint_indices"]].detach().cpu().numpy()
+    record["time_s"].append(float((step_idx + 1) * env.dt))
+    record["torque"].append(torques.astype(np.float32, copy=True))
+
+
+def save_torque_record(record, args, model_metadata):
+    output_dir = build_torque_output_dir(args, model_metadata)
+    torque_array = np.asarray(record["torque"], dtype=np.float32)
+    time_array = np.asarray(record["time_s"], dtype=np.float32)
+    joint_names = np.asarray(record["joint_names"], dtype=str)
+
+    npz_path = os.path.join(output_dir, "piper_joint_torques.npz")
+    csv_path = os.path.join(output_dir, "piper_joint_torques.csv")
+    np.savez(npz_path, time_s=time_array, torque=torque_array, joint_names=joint_names)
+
+    header = "time_s," + ",".join(record["joint_names"])
+    if torque_array.size:
+        csv_data = np.column_stack([time_array, torque_array])
+        np.savetxt(csv_path, csv_data, delimiter=",", header=header, comments="")
+    else:
+        with open(csv_path, "w", encoding="utf-8") as f:
+            f.write(header + "\n")
+
+    print(f"Saved Piper torque npz to: {npz_path}")
+    print(f"Saved Piper torque csv to: {csv_path}")
+    return output_dir
 
 
 def save_joint_tracking_plot(time_axis, joint_names, cmd_series, act_series, title, output_path):
@@ -261,7 +326,7 @@ def play(args):
     env.enable_gripper_cmd_force = ENABLE_PLAY_CMD_FORCE
     env.enable_play_immediate_gripper_cmd_force = ENABLE_PLAY_CMD_FORCE
     if env.viewer:
-        print("Viewer controls: press F to toggle follow camera on the current robot.")
+        print("Viewer controls: press F to toggle follow camera on the current robot; press X to save and exit.")
     if draw_mode:
         draw_steps = max(1, int(getattr(args, "draw_steps", 1000)))
         draw_leg_joint_names = resolve_draw_leg_joint_names(env)
@@ -277,10 +342,11 @@ def play(args):
     else:
         total_steps = 100 * int(env.max_episode_length)
 
+    torque_record = init_torque_record(env) if bool(getattr(args, "rec_torque", False)) else None
+
     policy_info = {}
     for i in range(total_steps):
         actions = policy(obs, policy_info)
-        command_targets = compute_command_targets(env, actions) if draw_mode else None
         # breakpoint()
         if FIX_COMMAND:
             env.commands[:, 0] = 0.    # 1.0
@@ -289,7 +355,10 @@ def play(args):
             env.commands[:, 3] = 0.
             # env.gait_indices[:] = 0.
         obs, rews, dones, infos = env.step(actions.detach())
+        if torque_record is not None:
+            append_torque_record(torque_record, env, i)
         if draw_mode:
+            command_targets = compute_command_targets(env)
             actual_dof_pos = env.dof_pos[0].detach().cpu().numpy()
             draw_time_axis.append((i + 1) * env.dt)
             for joint_name, joint_idx in zip(draw_leg_joint_names, leg_joint_indices):
@@ -345,6 +414,9 @@ def play(args):
             # plt.draw()
             # plt.pause(0.001)
 
+        if getattr(env, "key_exit_requested", False):
+            break
+
     if draw_mode:
         output_dir = build_draw_output_dir(args, model_metadata)
         leg_output_path = os.path.join(output_dir, "leg_joint_tracking.png")
@@ -367,6 +439,8 @@ def play(args):
         )
         print(f"Saved leg tracking plot to: {leg_output_path}")
         print(f"Saved arm tracking plot to: {arm_output_path}")
+    if torque_record is not None:
+        save_torque_record(torque_record, args, model_metadata)
 
 if __name__ == '__main__':
     EXPORT_POLICY = True

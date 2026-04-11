@@ -232,6 +232,9 @@ class B2Z1PosForceRoughCfg( LeggedRobotCfg ):
         damping = {'hip': 7.5, 'thigh': 7.5, 'calf': 12.5, 'z1_waist': 1.5, 'z1_shoulder': 3.0, 'z1_elbow': 1.5, 'z1_wrist_angle': 1.5, 'z1_forearm_roll': 1.5, 'z1_wrist_rotate': 1.5, 'z1_jointGripper': 1.5, }     # [N*m*s/rad]
         # action scale: target angle = actionScale * action + defaultAngle
         action_scale = 0.25
+        enable_arm_pd_equivalent_action_remap = False
+        arm_pd_remap_old_stiffness = {}
+        arm_pd_remap_old_damping = {}
         # decimation: Number of control action updates @ sim DT per policy DT
         decimation = 4
     
