@@ -73,7 +73,7 @@ def get_eval_args():
             "name": "--eval_case",
             "type": str,
             "default": "all",
-            "help": "Case to run: all, position_only, hybrid_force_position, base_disturbance, mixed_whole_body",
+            "help": "Case to run: all, position_only, hybrid_force_position, arm_force_estimation, base_force_estimation, base_disturbance, mixed_whole_body",
         },
         {"name": "--eval_repeats", "type": int, "default": 1, "help": "Repeat each scripted scenario this many times."},
         {"name": "--output_dir", "type": str, "default": "eval_reports", "help": "Directory for eval outputs."},
@@ -99,6 +99,12 @@ def error_to_score(error: float, good: float, bad: float) -> float:
 
 def ratio_to_score(ratio: float, good: float, bad: float) -> float:
     return error_to_score(ratio, good, bad)
+
+
+def force_relative_accuracy(mae: float, target_norm: float) -> float:
+    if mae is None or target_norm is None or math.isnan(mae) or math.isnan(target_norm) or target_norm <= 1e-6:
+        return float("nan")
+    return float(np.clip(100.0 * (1.0 - mae / target_norm), 0.0, 100.0))
 
 
 def mean_or_nan(values: List[float]) -> float:
@@ -309,6 +315,100 @@ def build_scenarios(home_local: np.ndarray) -> Dict[str, List[Scenario]]:
                 ],
             ),
         ],
+        "arm_force_estimation": [
+            Scenario(
+                name="arm_force_x_probe",
+                primary_metric="estimator_ee_force_mae",
+                success_threshold=3.0,
+                phases=[
+                    phase(0.6, home_local, collect=False, tag="warmup"),
+                    phase(0.5, home_local, primary_collect=False, tag="zero_probe"),
+                    phase(
+                        1.2,
+                        home_local,
+                        ee_ext_force_local=(10.0, 0.0, 0.0),
+                        tag="force_probe",
+                    ),
+                ],
+            ),
+            Scenario(
+                name="arm_force_z_probe",
+                primary_metric="estimator_ee_force_mae",
+                success_threshold=3.0,
+                phases=[
+                    phase(0.6, home_local, collect=False, tag="warmup"),
+                    phase(0.5, home_local, primary_collect=False, tag="zero_probe"),
+                    phase(
+                        1.2,
+                        home_local,
+                        ee_ext_force_local=(0.0, 0.0, -8.0),
+                        tag="force_probe",
+                    ),
+                ],
+            ),
+            Scenario(
+                name="arm_force_xy_probe",
+                primary_metric="estimator_ee_force_mae",
+                success_threshold=3.0,
+                phases=[
+                    phase(0.6, home_local, collect=False, tag="warmup"),
+                    phase(0.5, home_local, primary_collect=False, tag="zero_probe"),
+                    phase(
+                        1.2,
+                        home_local,
+                        ee_ext_force_local=(6.0, -6.0, 0.0),
+                        tag="force_probe",
+                    ),
+                ],
+            ),
+        ],
+        "base_force_estimation": [
+            Scenario(
+                name="base_force_x_probe",
+                primary_metric="estimator_base_force_mae",
+                success_threshold=2.5,
+                phases=[
+                    phase(0.6, home_local, collect=False, tag="warmup"),
+                    phase(0.5, home_local, primary_collect=False, tag="zero_probe"),
+                    phase(
+                        1.2,
+                        home_local,
+                        base_ext_force_local=(6.0, 0.0, 0.0),
+                        tag="force_probe",
+                    ),
+                ],
+            ),
+            Scenario(
+                name="base_force_y_probe",
+                primary_metric="estimator_base_force_mae",
+                success_threshold=2.5,
+                phases=[
+                    phase(0.6, home_local, collect=False, tag="warmup"),
+                    phase(0.5, home_local, primary_collect=False, tag="zero_probe"),
+                    phase(
+                        1.2,
+                        home_local,
+                        base_ext_force_local=(0.0, 6.0, 0.0),
+                        tag="force_probe",
+                    ),
+                ],
+            ),
+            Scenario(
+                name="base_force_xy_probe",
+                primary_metric="estimator_base_force_mae",
+                success_threshold=2.5,
+                phases=[
+                    phase(0.6, home_local, collect=False, tag="warmup"),
+                    phase(0.5, home_local, primary_collect=False, tag="zero_probe"),
+                    phase(
+                        1.2,
+                        home_local,
+                        base_ext_force_local=(-5.0, 4.0, 0.0),
+                        tag="force_probe",
+                    ),
+                ],
+            ),
+        ],
         "base_disturbance": [
             Scenario(
                 name="base_forward_x_disturbance",
@@ -489,6 +589,10 @@ def compute_step_metrics(env, latent_pred_tensor: torch.Tensor, gt_obs_pred_tens
     gt_ee_force = gt[:, 6:9] / obs_scales.ee_force
     pred_base_force = pred[:, 9:12] / obs_scales.base_force
     gt_base_force = gt[:, 9:12] / obs_scales.base_force
+    pred_ee_force_norm = torch.norm(pred_ee_force, dim=1)
+    gt_ee_force_norm = torch.norm(gt_ee_force, dim=1)
+    pred_base_force_norm = torch.norm(pred_base_force, dim=1)
+    gt_base_force_norm = torch.norm(gt_base_force, dim=1)
 
     estimator_base_vel_mae = torch.norm(pred_base_vel - gt_base_vel, dim=1)
     estimator_ee_pos_mae = torch.norm(pred_ee_local_cart - gt_ee_local_cart, dim=1)
@@ -514,6 +618,10 @@ def compute_step_metrics(env, latent_pred_tensor: torch.Tensor, gt_obs_pred_tens
         "estimator_ee_pos_mae": estimator_ee_pos_mae,
         "estimator_ee_force_mae": estimator_ee_force_mae,
         "estimator_base_force_mae": estimator_base_force_mae,
+        "estimator_ee_force_pred_norm": pred_ee_force_norm,
+        "estimator_ee_force_gt_norm": gt_ee_force_norm,
+        "estimator_base_force_pred_norm": pred_base_force_norm,
+        "estimator_base_force_gt_norm": gt_base_force_norm,
     }
 
 
@@ -655,6 +763,7 @@ def summarize_case(case_name: str, case_records: Dict, dt: float) -> Dict[str, f
         "smoothness_score_pct": smoothness_score,
         "disturbance_band_accuracy_pct": disturbance_band_accuracy,
         "force_band_accuracy_pct": force_band_accuracy,
+        "estimator_by_tag": summarize_estimator_tags(tags),
     }
 
     if case_name == "position_only":
@@ -674,6 +783,36 @@ def summarize_case(case_name: str, case_records: Dict, dt: float) -> Dict[str, f
             + 0.35 * case_summary["tracking_score_pct"]
             + 0.15 * band
             + 0.15 * case_summary["survival_rate_pct"]
+        )
+    elif case_name == "arm_force_estimation":
+        force_diag = summarize_force_estimator_branch(tags["force_probe"], "ee")
+        case_summary["force_estimator_branch"] = "ee"
+        case_summary["force_estimation_nonzero_accuracy_pct"] = force_diag["nonzero_force_accuracy_pct"]
+        case_summary["force_estimation_mae_all_n"] = force_diag["mae_all_n"]
+        case_summary["force_estimation_mae_nonzero_n"] = force_diag["mae_nonzero_n"]
+        case_summary["force_estimation_nonzero_gt_norm_mean_n"] = force_diag["nonzero_gt_force_norm_mean_n"]
+        case_summary["force_estimation_nonzero_pred_norm_mean_n"] = force_diag["nonzero_pred_force_norm_mean_n"]
+        accuracy = 0.0 if math.isnan(force_diag["nonzero_force_accuracy_pct"]) else force_diag["nonzero_force_accuracy_pct"]
+        case_summary["tracking_score_pct"] = accuracy
+        case_summary["case_score_pct"] = (
+            0.70 * accuracy
+            + 0.20 * case_summary["success_rate_pct"]
+            + 0.10 * case_summary["survival_rate_pct"]
+        )
+    elif case_name == "base_force_estimation":
+        force_diag = summarize_force_estimator_branch(tags["force_probe"], "base")
+        case_summary["force_estimator_branch"] = "base"
+        case_summary["force_estimation_nonzero_accuracy_pct"] = force_diag["nonzero_force_accuracy_pct"]
+        case_summary["force_estimation_mae_all_n"] = force_diag["mae_all_n"]
+        case_summary["force_estimation_mae_nonzero_n"] = force_diag["mae_nonzero_n"]
+        case_summary["force_estimation_nonzero_gt_norm_mean_n"] = force_diag["nonzero_gt_force_norm_mean_n"]
+        case_summary["force_estimation_nonzero_pred_norm_mean_n"] = force_diag["nonzero_pred_force_norm_mean_n"]
+        accuracy = 0.0 if math.isnan(force_diag["nonzero_force_accuracy_pct"]) else force_diag["nonzero_force_accuracy_pct"]
+        case_summary["tracking_score_pct"] = accuracy
+        case_summary["case_score_pct"] = (
+            0.70 * accuracy
+            + 0.20 * case_summary["success_rate_pct"]
+            + 0.10 * case_summary["survival_rate_pct"]
         )
     elif case_name == "base_disturbance":
         case_summary["tracking_score_pct"] = error_to_score(base_comp_vel_rmse, 0.04, 0.35)
@@ -704,21 +843,105 @@ def summarize_case(case_name: str, case_records: Dict, dt: float) -> Dict[str, f
     return case_summary
 
 
+def summarize_force_estimator_branch(records: Dict[str, List[float]], branch: str, nonzero_threshold_n: float = 1e-3) -> Dict[str, float]:
+    mae_values = np.asarray(records.get(f"estimator_{branch}_force_mae", []), dtype=np.float64)
+    pred_norm = np.asarray(records.get(f"estimator_{branch}_force_pred_norm", []), dtype=np.float64)
+    gt_norm = np.asarray(records.get(f"estimator_{branch}_force_gt_norm", []), dtype=np.float64)
+
+    if gt_norm.size == 0:
+        return {
+            "sample_count": 0,
+            "nonzero_sample_count": 0,
+            "nonzero_sample_pct": 0.0,
+            "gt_force_norm_mean_n": float("nan"),
+            "pred_force_norm_mean_n": float("nan"),
+            "nonzero_gt_force_norm_mean_n": float("nan"),
+            "nonzero_pred_force_norm_mean_n": float("nan"),
+            "mae_all_n": float("nan"),
+            "mae_nonzero_n": float("nan"),
+            "nonzero_force_accuracy_pct": float("nan"),
+            "nonzero_force_score_pct": 0.0,
+            "zero_force_false_positive_pred_norm_n": float("nan"),
+        }
+
+    nonzero_mask = gt_norm > nonzero_threshold_n
+    zero_mask = ~nonzero_mask
+    nonzero_mae = mean_or_nan(mae_values[nonzero_mask].tolist()) if np.any(nonzero_mask) else float("nan")
+    zero_pred_norm = mean_or_nan(pred_norm[zero_mask].tolist()) if np.any(zero_mask) else float("nan")
+    gt_norm_mean = float(np.mean(gt_norm))
+    pred_norm_mean = float(np.mean(pred_norm))
+    nonzero_gt_norm_mean = mean_or_nan(gt_norm[nonzero_mask].tolist()) if np.any(nonzero_mask) else float("nan")
+    nonzero_pred_norm_mean = mean_or_nan(pred_norm[nonzero_mask].tolist()) if np.any(nonzero_mask) else float("nan")
+    nonzero_accuracy = force_relative_accuracy(nonzero_mae, nonzero_gt_norm_mean)
+
+    return {
+        "sample_count": int(gt_norm.size),
+        "nonzero_sample_count": int(np.sum(nonzero_mask)),
+        "nonzero_sample_pct": percentage(np.sum(nonzero_mask), gt_norm.size),
+        "gt_force_norm_mean_n": gt_norm_mean,
+        "pred_force_norm_mean_n": pred_norm_mean,
+        "nonzero_gt_force_norm_mean_n": nonzero_gt_norm_mean,
+        "nonzero_pred_force_norm_mean_n": nonzero_pred_norm_mean,
+        "mae_all_n": mean_or_nan(mae_values.tolist()),
+        "mae_nonzero_n": nonzero_mae,
+        "nonzero_force_accuracy_pct": nonzero_accuracy,
+        "nonzero_force_score_pct": 0.0 if math.isnan(nonzero_accuracy) else nonzero_accuracy,
+        "zero_force_false_positive_pred_norm_n": zero_pred_norm,
+    }
+
+
+def force_branch_score(all_score: float, nonzero_score: float, nonzero_count: int) -> float:
+    if nonzero_count <= 0 or math.isnan(nonzero_score):
+        return all_score
+    return 0.5 * all_score + 0.5 * nonzero_score
+
+
+def summarize_estimator_tags(tags: Dict) -> Dict[str, Dict[str, Dict[str, float]]]:
+    tag_summaries = {}
+    for tag, records in tags.items():
+        ee_diag = summarize_force_estimator_branch(records, "ee")
+        base_diag = summarize_force_estimator_branch(records, "base")
+        if ee_diag["sample_count"] > 0 or base_diag["sample_count"] > 0:
+            tag_summaries[tag] = {
+                "ee_force": ee_diag,
+                "base_force": base_diag,
+            }
+    return tag_summaries
+
+
 def summarize_estimator(estimator_records: Dict[str, List[float]]) -> Dict[str, float]:
     base_vel_mae = mean_or_nan(estimator_records["estimator_base_vel_mae"])
     ee_pos_mae = mean_or_nan(estimator_records["estimator_ee_pos_mae"])
     ee_force_mae = mean_or_nan(estimator_records["estimator_ee_force_mae"])
     base_force_mae = mean_or_nan(estimator_records["estimator_base_force_mae"])
+    ee_force_diag = summarize_force_estimator_branch(estimator_records, "ee")
+    base_force_diag = summarize_force_estimator_branch(estimator_records, "base")
+    ee_force_all_score = error_to_score(ee_force_mae, 3.0, 20.0)
+    base_force_all_score = error_to_score(base_force_mae, 3.0, 20.0)
+    ee_force_score = force_branch_score(
+        ee_force_all_score,
+        ee_force_diag["nonzero_force_score_pct"],
+        ee_force_diag["nonzero_sample_count"],
+    )
+    base_force_score = force_branch_score(
+        base_force_all_score,
+        base_force_diag["nonzero_force_score_pct"],
+        base_force_diag["nonzero_sample_count"],
+    )
 
     summary = {
         "base_velocity_estimation_mae_mps": base_vel_mae,
         "ee_position_estimation_mae_cm": ee_pos_mae * 100.0 if not math.isnan(ee_pos_mae) else float("nan"),
         "ee_force_estimation_mae_n": ee_force_mae,
         "base_force_estimation_mae_n": base_force_mae,
+        "ee_force_estimator_diagnostics": ee_force_diag,
+        "base_force_estimator_diagnostics": base_force_diag,
         "base_velocity_estimation_score_pct": error_to_score(base_vel_mae, 0.03, 0.30),
         "ee_position_estimation_score_pct": error_to_score(ee_pos_mae, 0.03, 0.15),
-        "ee_force_estimation_score_pct": error_to_score(ee_force_mae, 3.0, 20.0),
-        "base_force_estimation_score_pct": error_to_score(base_force_mae, 3.0, 20.0),
+        "ee_force_estimation_all_sample_score_pct": ee_force_all_score,
+        "base_force_estimation_all_sample_score_pct": base_force_all_score,
+        "ee_force_estimation_score_pct": ee_force_score,
+        "base_force_estimation_score_pct": base_force_score,
     }
     summary["estimator_overall_score_pct"] = (
         0.25 * summary["base_velocity_estimation_score_pct"]
@@ -924,6 +1147,21 @@ def resolve_model_metadata(args, train_cfg):
     }
 
 
+def format_force_diag(diag: Dict[str, float]) -> str:
+    return (
+        f"samples={diag['sample_count']}, "
+        f"nonzero={diag['nonzero_sample_count']} ({format_float(diag['nonzero_sample_pct'], 1)} %), "
+        f"gt_norm={format_float(diag['gt_force_norm_mean_n'], 2)} N, "
+        f"pred_norm={format_float(diag['pred_force_norm_mean_n'], 2)} N, "
+        f"nonzero_acc={format_float(diag['nonzero_force_accuracy_pct'], 2)} %, "
+        f"nonzero_gt_norm={format_float(diag['nonzero_gt_force_norm_mean_n'], 2)} N, "
+        f"nonzero_pred_norm={format_float(diag['nonzero_pred_force_norm_mean_n'], 2)} N, "
+        f"mae_all={format_float(diag['mae_all_n'], 2)} N, "
+        f"mae_nonzero={format_float(diag['mae_nonzero_n'], 2)} N, "
+        f"zero_gt_pred_norm={format_float(diag['zero_force_false_positive_pred_norm_n'], 2)} N"
+    )
+
+
 def build_markdown_report(metadata, case_summaries, estimator_summary, runtime_quality, overall_summary):
     lines = [
         "# Go2+Piper Automated Evaluation Report",
@@ -948,6 +1186,8 @@ def build_markdown_report(metadata, case_summaries, estimator_summary, runtime_q
         f"- Overall score: `{format_float(overall_summary['overall_score_pct'], 2)} %`",
         f"- Position score: `{format_float(overall_summary['position_score_pct'], 2)} %`",
         f"- Hybrid score: `{format_float(overall_summary['hybrid_score_pct'], 2)} %`",
+        f"- Arm force estimation score: `{format_float(overall_summary['arm_force_estimation_score_pct'], 2)} %`",
+        f"- Base force estimation score: `{format_float(overall_summary['base_force_estimation_score_pct'], 2)} %`",
         f"- Base disturbance score: `{format_float(overall_summary['base_score_pct'], 2)} %`",
         f"- Mixed whole-body score: `{format_float(overall_summary['mixed_score_pct'], 2)} %`",
         f"- Estimator score: `{format_float(overall_summary['estimator_score_pct'], 2)} %`",
@@ -974,8 +1214,28 @@ def build_markdown_report(metadata, case_summaries, estimator_summary, runtime_q
             f"- Contact cleanliness: `{format_float(summary['contact_cleanliness_score_pct'], 2)} %`",
             f"- Foot slip ratio: `{format_float(summary['foot_slip_ratio_pct'], 2)} %`",
             f"- Smoothness: `{format_float(summary['smoothness_score_pct'], 2)} %`",
-            "",
         ])
+        if "force_estimator_branch" in summary:
+            lines.extend([
+                f"- Force estimator branch: `{summary['force_estimator_branch']}`",
+                f"- Force estimation nonzero accuracy: `{format_float(summary['force_estimation_nonzero_accuracy_pct'], 2)} %`",
+                f"- Force estimation MAE all samples: `{format_float(summary['force_estimation_mae_all_n'], 2)} N`",
+                f"- Force estimation MAE nonzero samples: `{format_float(summary['force_estimation_mae_nonzero_n'], 2)} N`",
+                f"- Nonzero force norm mean: gt `{format_float(summary['force_estimation_nonzero_gt_norm_mean_n'], 2)} N`, pred `{format_float(summary['force_estimation_nonzero_pred_norm_mean_n'], 2)} N`",
+            ])
+        nonzero_tag_lines = []
+        for tag, tag_diag in summary.get("estimator_by_tag", {}).items():
+            ee_diag = tag_diag["ee_force"]
+            base_diag = tag_diag["base_force"]
+            if ee_diag["nonzero_sample_count"] > 0 or base_diag["nonzero_sample_count"] > 0:
+                nonzero_tag_lines.extend([
+                    f"- `{tag}` EE force estimator: {format_force_diag(ee_diag)}",
+                    f"- `{tag}` base force estimator: {format_force_diag(base_diag)}",
+                ])
+        if nonzero_tag_lines:
+            lines.append("- Force-estimator diagnostics on nonzero-force tags:")
+            lines.extend(nonzero_tag_lines)
+        lines.append("")
 
     lines.extend([
         "## Estimator",
@@ -984,6 +1244,12 @@ def build_markdown_report(metadata, case_summaries, estimator_summary, runtime_q
         f"- EE position estimation MAE: `{format_float(estimator_summary['ee_position_estimation_mae_cm'], 2)} cm`",
         f"- EE force estimation MAE: `{format_float(estimator_summary['ee_force_estimation_mae_n'], 2)} N`",
         f"- Base force estimation MAE: `{format_float(estimator_summary['base_force_estimation_mae_n'], 2)} N`",
+        f"- EE force all-sample score: `{format_float(estimator_summary['ee_force_estimation_all_sample_score_pct'], 2)} %`",
+        f"- EE force nonzero-aware score: `{format_float(estimator_summary['ee_force_estimation_score_pct'], 2)} %`",
+        f"- Base force all-sample score: `{format_float(estimator_summary['base_force_estimation_all_sample_score_pct'], 2)} %`",
+        f"- Base force nonzero-aware score: `{format_float(estimator_summary['base_force_estimation_score_pct'], 2)} %`",
+        f"- EE force diagnostics: {format_force_diag(estimator_summary['ee_force_estimator_diagnostics'])}",
+        f"- Base force diagnostics: {format_force_diag(estimator_summary['base_force_estimator_diagnostics'])}",
         "",
         "## Runtime Quality",
         f"- Stability score: `{format_float(runtime_quality['stability_score_pct'], 2)} %`",
@@ -1003,6 +1269,8 @@ def print_console_summary(case_summaries, estimator_summary, runtime_quality, ov
     print(f"Overall score        : {format_float(overall_summary['overall_score_pct'], 2)} %")
     print(f"Position score       : {format_float(overall_summary['position_score_pct'], 2)} %")
     print(f"Hybrid score         : {format_float(overall_summary['hybrid_score_pct'], 2)} %")
+    print(f"Arm force est. score : {format_float(overall_summary['arm_force_estimation_score_pct'], 2)} %")
+    print(f"Base force est. score: {format_float(overall_summary['base_force_estimation_score_pct'], 2)} %")
     print(f"Base score           : {format_float(overall_summary['base_score_pct'], 2)} %")
     print(f"Mixed score          : {format_float(overall_summary['mixed_score_pct'], 2)} %")
     print(f"Estimator score      : {format_float(overall_summary['estimator_score_pct'], 2)} %")
@@ -1010,12 +1278,21 @@ def print_console_summary(case_summaries, estimator_summary, runtime_quality, ov
     print(f"Smoothness score     : {format_float(overall_summary['smoothness_score_pct'], 2)} %")
     print("")
     for case_name, summary in case_summaries.items():
-        print(
-            f"[{case_name}] success={format_float(summary['success_rate_pct'], 2)} % | "
-            f"case_score={format_float(summary['case_score_pct'], 2)} % | "
-            f"EE_RMSE={format_float(summary['compensated_ee_rmse_cm'], 2)} cm | "
-            f"base_RMSE={format_float(summary['base_comp_vel_rmse_mps'], 3)} m/s"
-        )
+        if "force_estimator_branch" in summary:
+            print(
+                f"[{case_name}] success={format_float(summary['success_rate_pct'], 2)} % | "
+                f"case_score={format_float(summary['case_score_pct'], 2)} % | "
+                f"nonzero_acc={format_float(summary['force_estimation_nonzero_accuracy_pct'], 2)} % | "
+                f"MAE_all={format_float(summary['force_estimation_mae_all_n'], 2)} N | "
+                f"MAE_nonzero={format_float(summary['force_estimation_mae_nonzero_n'], 2)} N"
+            )
+        else:
+            print(
+                f"[{case_name}] success={format_float(summary['success_rate_pct'], 2)} % | "
+                f"case_score={format_float(summary['case_score_pct'], 2)} % | "
+                f"EE_RMSE={format_float(summary['compensated_ee_rmse_cm'], 2)} cm | "
+                f"base_RMSE={format_float(summary['base_comp_vel_rmse_mps'], 3)} m/s"
+            )
     print("")
     print(
         "Estimator MAE        : "
@@ -1023,6 +1300,18 @@ def print_console_summary(case_summaries, estimator_summary, runtime_quality, ov
         f"ee_pos={format_float(estimator_summary['ee_position_estimation_mae_cm'], 2)} cm, "
         f"ee_force={format_float(estimator_summary['ee_force_estimation_mae_n'], 2)} N, "
         f"base_force={format_float(estimator_summary['base_force_estimation_mae_n'], 2)} N"
+    )
+    print(
+        "Arm/EE force estimate: "
+        f"nonzero_acc={format_float(estimator_summary['ee_force_estimator_diagnostics']['nonzero_force_accuracy_pct'], 2)} %, "
+        f"MAE_all={format_float(estimator_summary['ee_force_estimator_diagnostics']['mae_all_n'], 2)} N, "
+        f"MAE_nonzero={format_float(estimator_summary['ee_force_estimator_diagnostics']['mae_nonzero_n'], 2)} N"
+    )
+    print(
+        "Base force estimate  : "
+        f"nonzero_acc={format_float(estimator_summary['base_force_estimator_diagnostics']['nonzero_force_accuracy_pct'], 2)} %, "
+        f"MAE_all={format_float(estimator_summary['base_force_estimator_diagnostics']['mae_all_n'], 2)} N, "
+        f"MAE_nonzero={format_float(estimator_summary['base_force_estimator_diagnostics']['mae_nonzero_n'], 2)} N"
     )
     print(
         "Runtime quality      : "
@@ -1138,6 +1427,8 @@ def run_evaluation(args):
     overall_summary = {
         "position_score_pct": case_summaries.get("position_only", {}).get("case_score_pct", 0.0),
         "hybrid_score_pct": case_summaries.get("hybrid_force_position", {}).get("case_score_pct", 0.0),
+        "arm_force_estimation_score_pct": case_summaries.get("arm_force_estimation", {}).get("case_score_pct", 0.0),
+        "base_force_estimation_score_pct": case_summaries.get("base_force_estimation", {}).get("case_score_pct", 0.0),
         "base_score_pct": case_summaries.get("base_disturbance", {}).get("case_score_pct", 0.0),
         "mixed_score_pct": case_summaries.get("mixed_whole_body", {}).get("case_score_pct", 0.0),
         "estimator_score_pct": estimator_summary["estimator_overall_score_pct"],
@@ -1145,17 +1436,21 @@ def run_evaluation(args):
         "smoothness_score_pct": runtime_quality["smoothness_score_pct"],
     }
     weights = {
-        "position_score_pct": 0.20,
-        "hybrid_score_pct": 0.25,
-        "base_score_pct": 0.20,
-        "mixed_score_pct": 0.10,
-        "estimator_score_pct": 0.15,
-        "stability_score_pct": 0.07,
-        "smoothness_score_pct": 0.03,
+        "position_score_pct": 0.16,
+        "hybrid_score_pct": 0.20,
+        "arm_force_estimation_score_pct": 0.10,
+        "base_force_estimation_score_pct": 0.10,
+        "base_score_pct": 0.16,
+        "mixed_score_pct": 0.08,
+        "estimator_score_pct": 0.12,
+        "stability_score_pct": 0.06,
+        "smoothness_score_pct": 0.02,
     }
     case_component_map = {
         "position_score_pct": "position_only",
         "hybrid_score_pct": "hybrid_force_position",
+        "arm_force_estimation_score_pct": "arm_force_estimation",
+        "base_force_estimation_score_pct": "base_force_estimation",
         "base_score_pct": "base_disturbance",
         "mixed_score_pct": "mixed_whole_body",
     }

@@ -30,7 +30,7 @@ python eval_go2piperposforce.py --task=go2_piper_pos_force --load_run=<run_name>
 常用参数：
 
 - `--eval_case all`
-  运行完整 benchmark。也可选 `position_only`、`hybrid_force_position`、`base_disturbance`、`mixed_whole_body`
+  运行完整 benchmark。也可选 `position_only`、`hybrid_force_position`、`arm_force_estimation`、`base_force_estimation`、`base_disturbance`、`mixed_whole_body`
 - `--eval_repeats <N>`
   每个 scripted scenario 重复运行 `N` 次，再做汇总。`N=1` 时使用正常的 `--seed` / config seed；`N>1` 时每个 case repeat 使用随机 seed，并在 `summary.json` 的 metadata 里记录实际 seed
 - `--num_envs <N>`
@@ -93,7 +93,49 @@ python eval_go2piperposforce.py --task=go2_piper_pos_force --load_run=<run_name>
 - 它不是现实接触任务里的最终力控制成功率
 - 主 tracking、success 和 settling 指标只统计真正的 `force_track` 段，不把前面的 `pre_force` 准备段混进去
 
-## 3.3 Base Disturbance
+## 3.3 Arm Force Estimation
+
+目的：
+
+- 专门测试机械臂 / 末端外力估计是否真的学会
+- 避免全局 estimator 指标被大量 0 力样本稀释
+- 直接观察真实 EE 外力存在时，预测力是否有幅值响应
+
+特点：
+
+- 不给 EE force command，只注入 EE external force
+- 分别测试 `x`、`z` 和 `xy` 方向外力
+- 只把 `force_probe` 段用于核心力估计评分
+
+核心输出：
+
+- nonzero-force relative accuracy
+- all-sample MAE
+- nonzero-force-only MAE
+- 非零外力段的真实力范数均值与预测力范数均值
+
+## 3.4 Base Force Estimation
+
+目的：
+
+- 专门测试狗本体 / 底座外力估计是否真的学会
+- 检查 base external force 存在时，estimator 是否仍然塌缩为接近 0 的预测
+- 与 `base_disturbance` 的运动补偿评分分离，避免“速度没坏”被误读成“力估计正确”
+
+特点：
+
+- 不给 base force command，只注入 base external force
+- 分别测试 `x`、`y` 和 `xy` 方向外力
+- 只把 `force_probe` 段用于核心力估计评分
+
+核心输出：
+
+- nonzero-force relative accuracy
+- all-sample MAE
+- nonzero-force-only MAE
+- 非零外力段的真实力范数均值与预测力范数均值
+
+## 3.5 Base Disturbance
 
 目的：
 
@@ -109,7 +151,12 @@ python eval_go2piperposforce.py --task=go2_piper_pos_force --load_run=<run_name>
 - 平移受扰 tracking 只统计 `disturbance` 段
 - `base_yaw_tracking` 只用于 yaw 维度，不再混入平移速度 RMSE
 
-## 3.4 Mixed Whole-Body
+注意：
+
+- `base_disturbance` 更偏“受扰后速度控制是否还能工作”
+- `base_force_estimation` 才是专门的“底座力估计是否准确”测试
+
+## 3.6 Mixed Whole-Body
 
 目的：
 
@@ -308,11 +355,34 @@ python eval_go2piperposforce.py --task=go2_piper_pos_force --load_run=<run_name>
 
 - `N`
 
+报告同时包含：
+
+- all-sample MAE
+- nonzero-force-only MAE
+- nonzero-force relative accuracy
+- target force norm mean
+- predicted force norm mean
+- zero-force false-positive prediction norm
+
+原因：
+
+- 默认 benchmark 中很多阶段的外部力为 0
+- 如果只看全局 MAE，一个永远预测 0 的 force estimator 也可能看起来不错
+- 因此需要单独看非零 force 段，确认 estimator 在真正受力时是否有响应
+- nonzero-force relative accuracy 使用 `1 - nonzero_mae / nonzero_target_norm` 的直观口径；如果真实存在明显外力但预测为 `0N`，该项会接近 `0%`
+
 ### 7.4 Base Force Estimation MAE
 
 单位：
 
 - `N`
+
+报告同样包含 all-sample 与 nonzero-force-only 诊断。尤其要关注：
+
+- `base_disturbance / disturbance`
+- `mixed_whole_body / move_disturbance`
+
+这些 tag 下的 base force target norm、predicted norm 和 nonzero MAE 能直接暴露“真实 base 外力存在时 estimator 是否仍然预测 0”。其中 `base_force_estimation` 是更干净的专项测试，因为它只注入外部力，不叠加 base force command。
 
 ### 7.5 Estimator Overall Score
 
@@ -320,12 +390,18 @@ python eval_go2piperposforce.py --task=go2_piper_pos_force --load_run=<run_name>
 
 - `%`
 
-由以上 4 项分数平均得到。
+由 4 项 estimator 分数平均得到。force estimator 分支现在使用 nonzero-aware score：
+
+- 如果该分支存在非零 force 样本，则综合 all-sample score 和 nonzero-force relative accuracy
+- 如果没有非零 force 样本，则退回 all-sample score
 
 解读：
 
 - 如果 estimator score 很低，但 tracking 还可以，说明策略可能主要靠动作记忆或直接映射在硬撑
 - 如果 estimator score 高但控制分不高，说明低层估计不错，但策略使用得还不够好
+- 如果 all-sample force MAE 很低但 nonzero-force MAE 很高，说明报告被零力样本稀释，不能认为 force estimator 已经学好
+
+报告还会在每个 case 的非零 force tag 下输出 estimator diagnostics，便于直接定位是哪类受力阶段出了问题。
 
 ## 8. Runtime Quality：稳定性与运行品质
 
@@ -437,18 +513,21 @@ python eval_go2piperposforce.py --task=go2_piper_pos_force --load_run=<run_name>
 
 当前 overall score 采用加权汇总：
 
-- `20%` Position score
-- `25%` Hybrid force-position score
-- `20%` Base disturbance score
-- `10%` Mixed whole-body score
-- `15%` Estimator overall score
-- `7%` Stability score
-- `3%` Smoothness score
+- `16%` Position score
+- `20%` Hybrid force-position score
+- `10%` Arm force estimation score
+- `10%` Base force estimation score
+- `16%` Base disturbance score
+- `8%` Mixed whole-body score
+- `12%` Estimator overall score
+- `6%` Stability score
+- `2%` Smoothness score
 
 这样设计的原因是：
 
 - 这个项目不是纯 locomotion 项目
 - UniFP 的核心卖点是统一的 force-position control 和 estimator
+- 现在把臂端和底座的 force estimator 拆成独立大项，避免 0 力样本或速度控制结果掩盖力估计问题
 - 但稳定性与控制质量仍然必须保留权重
 
 如果只运行单个 `eval_case`，脚本会只对本次实际参与的分项重新归一化加权，不会把没有运行的 case 直接按 0 分算入总分。

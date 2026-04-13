@@ -155,7 +155,7 @@ Notes:
 - Keyplay is intended for debugging, qualitative policy inspection, and fast command-side testing.
 
 #### Automated Evaluation Benchmark
-Use the automated evaluation script to run a reproducible benchmark suite for the current Go2+Piper checkpoint. It evaluates position tracking, hybrid force-position behavior, base disturbance compensation, estimator quality, and whole-body robustness, then exports a machine-readable JSON report plus a Markdown summary.
+Use the automated evaluation script to run a reproducible benchmark suite for the current Go2+Piper checkpoint. It evaluates position tracking, hybrid force-position behavior, dedicated arm/base force estimation, base disturbance compensation, estimator quality, and whole-body robustness, then exports a machine-readable JSON report plus a Markdown summary.
 
 ```bash
 # Go2+Piper automated evaluation
@@ -165,7 +165,7 @@ python eval_go2piperposforce.py --task=go2_piper_pos_force --load_run=<run_name>
 Useful options:
 
 - `--eval_case all`
-  Run the full benchmark suite. You can also choose `position_only`, `hybrid_force_position`, `base_disturbance`, or `mixed_whole_body`.
+  Run the full benchmark suite. You can also choose `position_only`, `hybrid_force_position`, `arm_force_estimation`, `base_force_estimation`, `base_disturbance`, or `mixed_whole_body`.
 - `--eval_repeats <N>`
   Repeat each scripted scenario `N` times before aggregating the final report. With `N=1`, eval uses the normal `--seed` / config seed path. With `N>1`, each case repeat gets a fresh random seed and the used seeds are recorded in `summary.json`.
 - `--output_dir <dir>`
