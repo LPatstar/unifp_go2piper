@@ -27,7 +27,7 @@ from legged_gym.envs.b2.legged_robot_b2z1_pos_force import (
     INDEX_EE_FORCE_Z,
 )
 from legged_gym.utils import task_registry
-from legged_gym.utils.helpers import class_to_dict, get_load_path, print_env_control_gains
+from legged_gym.utils.helpers import class_to_dict, get_load_path, print_env_control_gains, set_seed
 from legged_gym.utils.isaacgym_utils import sphere2cart
 
 
@@ -154,6 +154,20 @@ def show_progress(status_line: str, current: int, total: int, first_update: bool
     else:
         print(status_line)
         print(progress_line)
+
+
+def build_repeat_seeds(case_names, eval_repeats):
+    if eval_repeats <= 1:
+        return {}
+    num_seeds = len(case_names) * eval_repeats
+    seed_values = np.random.SeedSequence().generate_state(num_seeds, dtype=np.uint32)
+    seed_values = [int(seed % np.uint32(2**31 - 1)) for seed in seed_values]
+    seeds = {}
+    cursor = 0
+    for case_name in case_names:
+        seeds[case_name] = seed_values[cursor:cursor + eval_repeats]
+        cursor += eval_repeats
+    return seeds
 
 
 def make_json_safe(obj):
@@ -924,6 +938,9 @@ def build_markdown_report(metadata, case_summaries, estimator_summary, runtime_q
         f"- Model path: `{metadata['resolved_model_path']}`",
         f"- Num envs: `{metadata['num_envs']}`",
         f"- Eval repeats: `{metadata['eval_repeats']}`",
+        f"- Requested seed: `{metadata['requested_seed']}`",
+        f"- Base seed: `{metadata['base_seed']}`",
+        f"- Repeat seed mode: `{metadata['repeat_seed_mode']}`",
         f"- Dt: `{format_float(metadata['dt'], 4)}` s",
         f"- Terrain: `{metadata['terrain']}`",
         "",
@@ -1066,6 +1083,7 @@ def run_evaluation(args):
         raise ValueError(f"Unknown eval case(s): {invalid_cases}")
 
     case_records = {case: make_empty_case_records() for case in selected_cases}
+    repeat_seeds = build_repeat_seeds(selected_cases, args.eval_repeats)
     estimator_records = defaultdict(list)
     global_records = defaultdict(list)
     global_counts = {
@@ -1085,11 +1103,17 @@ def run_evaluation(args):
     for case_idx, case_name in enumerate(selected_cases, start=1):
         case_scenarios = scenario_bank[case_name]
         for repeat_idx in range(args.eval_repeats):
+            repeat_seed = None
+            if args.eval_repeats > 1:
+                repeat_seed = repeat_seeds[case_name][repeat_idx]
+                set_seed(repeat_seed)
             for scenario_idx, scenario in enumerate(case_scenarios, start=1):
+                seed_text = f" | seed {repeat_seed}" if repeat_seed is not None else ""
                 status_line = (
                     f"Current case {case_idx}/{len(selected_cases)}: {case_name} | "
                     f"repeat {repeat_idx + 1}/{args.eval_repeats} | "
                     f"scenario {scenario_idx}/{len(case_scenarios)}: {scenario.name}"
+                    f"{seed_text}"
                 )
                 show_progress(status_line, completed_scenarios, total_scenarios, first_update=first_progress_update)
                 first_progress_update = False
@@ -1149,6 +1173,10 @@ def run_evaluation(args):
         "task": args.task,
         "num_envs": env.num_envs,
         "eval_repeats": args.eval_repeats,
+        "requested_seed": args.seed,
+        "base_seed": env_cfg.seed,
+        "repeat_seed_mode": "random_per_case_repeat" if args.eval_repeats > 1 else "default_seed",
+        "repeat_seeds": repeat_seeds,
         "dt": env.dt,
         "terrain": "flat" if args.flat_terrain else "default_eval",
         "env_cfg": class_to_dict(env_cfg),

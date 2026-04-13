@@ -32,7 +32,7 @@ python eval_go2piperposforce.py --task=go2_piper_pos_force --load_run=<run_name>
 - `--eval_case all`
   运行完整 benchmark。也可选 `position_only`、`hybrid_force_position`、`base_disturbance`、`mixed_whole_body`
 - `--eval_repeats <N>`
-  每个 scripted scenario 重复运行 `N` 次，再做汇总
+  每个 scripted scenario 重复运行 `N` 次，再做汇总。`N=1` 时使用正常的 `--seed` / config seed；`N>1` 时每个 case repeat 使用随机 seed，并在 `summary.json` 的 metadata 里记录实际 seed
 - `--num_envs <N>`
   并行评测环境数
 - `--output_dir <dir>`

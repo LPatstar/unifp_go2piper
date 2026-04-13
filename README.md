@@ -167,7 +167,7 @@ Useful options:
 - `--eval_case all`
   Run the full benchmark suite. You can also choose `position_only`, `hybrid_force_position`, `base_disturbance`, or `mixed_whole_body`.
 - `--eval_repeats <N>`
-  Repeat each scripted scenario `N` times before aggregating the final report.
+  Repeat each scripted scenario `N` times before aggregating the final report. With `N=1`, eval uses the normal `--seed` / config seed path. With `N>1`, each case repeat gets a fresh random seed and the used seeds are recorded in `summary.json`.
 - `--output_dir <dir>`
   Directory used to save the exported evaluation reports. Default is `eval_reports/`.
 - `--no_report`
