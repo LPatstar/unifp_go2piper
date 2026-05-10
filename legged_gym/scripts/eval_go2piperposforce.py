@@ -31,6 +31,18 @@ from legged_gym.utils.helpers import class_to_dict, get_load_path, print_env_con
 from legged_gym.utils.isaacgym_utils import sphere2cart
 
 
+TRACKING_WINDOW_S = 0.25
+LAST_WINDOW_RMSE_METRICS = (
+    "nominal_ee_error",
+    "compensated_ee_error",
+    "base_nominal_vel_error",
+    "base_comp_vel_error",
+    "yaw_rate_error",
+    "roll_pitch_abs",
+    "base_ang_vel_xy_norm",
+)
+
+
 @dataclass
 class Phase:
     duration_s: float
@@ -654,6 +666,31 @@ def metric_values_for_case(case_name: str, tags: Dict[str, Dict[str, List[float]
     return all_metrics[metric_name]
 
 
+def rmse_values_for_case(case_name: str, case_records: Dict, metric_name: str) -> List[float]:
+    last_window_values = metric_values_for_case(
+        case_name,
+        case_records.get("last_window_tags", defaultdict(lambda: defaultdict(list))),
+        case_records.get("last_window_metrics", defaultdict(list)),
+        metric_name,
+    )
+    if last_window_values:
+        return last_window_values
+    return metric_values_for_case(case_name, case_records["tags"], case_records["all"], metric_name)
+
+
+def append_last_window_values(dst: List[float], metric_matrix: np.ndarray, last_window_steps: int):
+    if metric_matrix.size == 0:
+        return
+    for env_idx in range(metric_matrix.shape[1]):
+        env_values = metric_matrix[:, env_idx]
+        valid = ~np.isnan(env_values)
+        env_values = env_values[valid]
+        if env_values.size == 0:
+            continue
+        window = env_values[-last_window_steps:] if env_values.size >= last_window_steps else env_values
+        dst.extend(window.astype(np.float64).tolist())
+
+
 def compute_settling_times(error_matrix: np.ndarray, dt: float, threshold: float, dwell_s: float = 0.25) -> List[float]:
     if error_matrix.size == 0:
         return []
@@ -698,11 +735,15 @@ def summarize_case(case_name: str, case_records: Dict, dt: float) -> Dict[str, f
     settling_times = case_records["settling_times"]
     reset_flags = case_records["reset_flags"]
 
-    nominal_ee_rmse_m = rms_or_nan(metric_values_for_case(case_name, tags, all_metrics, "nominal_ee_error"))
-    compensated_ee_rmse_m = rms_or_nan(metric_values_for_case(case_name, tags, all_metrics, "compensated_ee_error"))
-    base_nominal_vel_rmse = rms_or_nan(metric_values_for_case(case_name, tags, all_metrics, "base_nominal_vel_error"))
-    base_comp_vel_rmse = rms_or_nan(metric_values_for_case(case_name, tags, all_metrics, "base_comp_vel_error"))
-    yaw_rate_rmse = rms_or_nan(metric_values_for_case(case_name, tags, all_metrics, "yaw_rate_error"))
+    nominal_ee_rmse_m = rms_or_nan(rmse_values_for_case(case_name, case_records, "nominal_ee_error"))
+    compensated_ee_rmse_m = rms_or_nan(rmse_values_for_case(case_name, case_records, "compensated_ee_error"))
+    base_nominal_vel_rmse = rms_or_nan(rmse_values_for_case(case_name, case_records, "base_nominal_vel_error"))
+    base_comp_vel_rmse = rms_or_nan(rmse_values_for_case(case_name, case_records, "base_comp_vel_error"))
+    yaw_rate_rmse = rms_or_nan(rmse_values_for_case(case_name, case_records, "yaw_rate_error"))
+    roll_pitch_rms = rms_or_nan(rmse_values_for_case(case_name, case_records, "roll_pitch_abs"))
+    base_ang_vel_xy_rms = rms_or_nan(rmse_values_for_case(case_name, case_records, "base_ang_vel_xy_norm"))
+    dynamic_baseline_roll_pitch_rms = rms_or_nan(tags["dynamic_baseline"].get("roll_pitch_abs", []))
+    dynamic_oracle_roll_pitch_rms = rms_or_nan(tags["dynamic_oracle"].get("roll_pitch_abs", []))
 
     posture_abs = []
     posture_abs.extend(all_metrics["roll_abs"])
@@ -742,6 +783,7 @@ def summarize_case(case_name: str, case_records: Dict, dt: float) -> Dict[str, f
 
     case_summary = {
         "case_name": case_name,
+        "tracking_rmse_window_s": TRACKING_WINDOW_S,
         "success_rate_pct": success_rate,
         "settling_time_s": settling_time_s,
         "nominal_ee_rmse_cm": nominal_ee_rmse_m * 100.0 if not math.isnan(nominal_ee_rmse_m) else float("nan"),
@@ -1003,6 +1045,8 @@ def run_scenario(env, policy, obs, scenario: Scenario, estimator_records, global
     scenario_records = {
         "all": defaultdict(list),
         "tags": defaultdict(lambda: defaultdict(list)),
+        "last_window_metrics": defaultdict(list),
+        "last_window_tags": defaultdict(lambda: defaultdict(list)),
         "segment_success": [],
         "settling_times": [],
         "reset_flags": [],
@@ -1012,6 +1056,8 @@ def run_scenario(env, policy, obs, scenario: Scenario, estimator_records, global
         "active_step_count": 0.0,
     }
     segment_primary_errors = []
+    segment_window_metric_rows = defaultdict(list)
+    segment_window_tag_rows = defaultdict(lambda: defaultdict(list))
     alive_mask = torch.ones(num_envs, dtype=torch.bool, device=env.device)
     any_reset_mask = torch.zeros(num_envs, dtype=torch.bool, device=env.device)
     policy_info = {}
@@ -1040,6 +1086,14 @@ def run_scenario(env, policy, obs, scenario: Scenario, estimator_records, global
                     row = np.full(num_envs, np.nan, dtype=np.float32)
                     row[active_cpu] = primary_values[active_cpu]
                     segment_primary_errors.append(row)
+                    for metric_name in LAST_WINDOW_RMSE_METRICS:
+                        if metric_name not in metrics:
+                            continue
+                        metric_values = metrics[metric_name].detach().cpu().numpy()
+                        metric_row = np.full(num_envs, np.nan, dtype=np.float32)
+                        metric_row[active_cpu] = metric_values[active_cpu]
+                        segment_window_metric_rows[metric_name].append(metric_row)
+                        segment_window_tag_rows[ph.tag][metric_name].append(metric_row)
 
                 scenario_records["foot_slip_total"] += float(torch.sum(metrics["foot_slip_events"][active_mask]).item())
                 scenario_records["foot_contact_total"] += float(torch.sum(metrics["foot_contact_count"][active_mask]).item())
@@ -1058,7 +1112,14 @@ def run_scenario(env, policy, obs, scenario: Scenario, estimator_records, global
             break
 
     error_matrix = stack_or_empty(segment_primary_errors, num_envs)
-    last_window_steps = max(1, int(round(0.25 / dt)))
+    last_window_steps = max(1, int(round(TRACKING_WINDOW_S / dt)))
+    for metric_name, rows in segment_window_metric_rows.items():
+        metric_matrix = stack_or_empty(rows, num_envs)
+        append_last_window_values(scenario_records["last_window_metrics"][metric_name], metric_matrix, last_window_steps)
+    for tag, tag_rows in segment_window_tag_rows.items():
+        for metric_name, rows in tag_rows.items():
+            metric_matrix = stack_or_empty(rows, num_envs)
+            append_last_window_values(scenario_records["last_window_tags"][tag][metric_name], metric_matrix, last_window_steps)
     scenario_records["segment_success"].extend(compute_segment_success(error_matrix, scenario.success_threshold, last_window_steps))
     scenario_records["settling_times"].extend(compute_settling_times(error_matrix, dt, scenario.success_threshold))
     scenario_records["reset_flags"].extend(any_reset_mask.detach().cpu().numpy().astype(np.float32).tolist())
@@ -1074,6 +1135,11 @@ def merge_case_records(dst, src):
     for tag, tag_dict in src["tags"].items():
         for name, values in tag_dict.items():
             dst["tags"][tag][name].extend(values)
+    for name, values in src["last_window_metrics"].items():
+        dst["last_window_metrics"][name].extend(values)
+    for tag, tag_dict in src["last_window_tags"].items():
+        for name, values in tag_dict.items():
+            dst["last_window_tags"][tag][name].extend(values)
     dst["segment_success"].extend(src["segment_success"])
     dst["settling_times"].extend(src["settling_times"])
     dst["reset_flags"].extend(src["reset_flags"])
@@ -1087,6 +1153,8 @@ def make_empty_case_records():
     return {
         "all": defaultdict(list),
         "tags": defaultdict(lambda: defaultdict(list)),
+        "last_window_metrics": defaultdict(list),
+        "last_window_tags": defaultdict(lambda: defaultdict(list)),
         "segment_success": [],
         "settling_times": [],
         "reset_flags": [],
@@ -1203,6 +1271,7 @@ def build_markdown_report(metadata, case_summaries, estimator_summary, runtime_q
             f"- Case score: `{format_float(summary['case_score_pct'], 2)} %`",
             f"- Success rate: `{format_float(summary['success_rate_pct'], 2)} %`",
             f"- Tracking score: `{format_float(summary['tracking_score_pct'], 2)} %`",
+            f"- Tracking RMSE window: `{format_float(summary['tracking_rmse_window_s'], 3)} s`",
             f"- Survival rate: `{format_float(summary['survival_rate_pct'], 2)} %`",
             f"- Settling time: `{format_float(summary['settling_time_s'], 3)} s`",
             f"- Nominal EE RMSE: `{format_float(summary['nominal_ee_rmse_cm'], 2)} cm`",

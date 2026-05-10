@@ -225,6 +225,7 @@ python eval_go2piperposforce.py --task=go2_piper_pos_force --load_run=<run_name>
 
 - 比 success rate 更平滑
 - 更适合比较“两个模型都能到，但谁更准”
+- 当前脚本中，tracking score 使用的 RMSE 与 success 一样，只看每个 scripted scenario 结束前最后 `0.25 s` 的 tracking 窗口，不把刚切目标后的过渡误差混进去
 
 ### 5.3 EE RMSE
 
@@ -238,6 +239,12 @@ python eval_go2piperposforce.py --task=go2_piper_pos_force --load_run=<run_name>
   相对原始位置目标
 - `Compensated EE RMSE`
   相对力补偿后的目标
+
+统计窗口：
+
+- 只统计每个 scripted scenario 的最后 `0.25 s` tracking 窗口
+- `warmup`、`pre_force` 等准备段不参与
+- 目标刚切换后的到达过程不再计入 RMSE，但仍会体现在 `Settling Time` 里
 
 解读：
 
@@ -270,6 +277,7 @@ python eval_go2piperposforce.py --task=go2_piper_pos_force --load_run=<run_name>
 含义：
 
 - 机身实际速度与原始速度命令之间的误差
+- 报告中的 RMSE 使用对应 tracking scenario 最后 `0.25 s` 的窗口
 
 ### 6.2 Base Compensated Velocity RMSE
 
@@ -280,6 +288,7 @@ python eval_go2piperposforce.py --task=go2_piper_pos_force --load_run=<run_name>
 含义：
 
 - 机身实际速度与“受力补偿后的目标速度”之间的误差
+- 报告中的 RMSE 使用对应 tracking scenario 最后 `0.25 s` 的窗口
 
 解读：
 
@@ -308,6 +317,7 @@ python eval_go2piperposforce.py --task=go2_piper_pos_force --load_run=<run_name>
 含义：
 
 - 偏航角速度跟踪误差
+- 报告中的 RMSE 使用对应 yaw tracking scenario 最后 `0.25 s` 的窗口
 
 解读：
 
