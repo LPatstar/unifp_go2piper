@@ -262,6 +262,7 @@ class B2Z1PosForceRoughCfg( LeggedRobotCfg ):
         only_positive_rewards = False # if true negative total rewards are clipped at zero (avoids early termination problems)
         tracking_sigma = 0.25 # tracking reward = exp(-error^2/sigma)
         tracking_ee_sigma = 1.0
+        tracking_ee_orn_sigma = 0.6
         soft_dof_pos_limit = 0.8 # percentage of urdf limits, values above this limit are penalized
         soft_dof_vel_limit = 1.
         soft_torque_limit = 0.9
@@ -313,7 +314,7 @@ class B2Z1PosForceRoughCfg( LeggedRobotCfg ):
             tracking_ee_cart = 0.
             arm_orientation = 0.
             arm_energy_abs_sum = 0.
-            tracking_ee_orn = 0.
+            tracking_ee_orn = 1.0
             tracking_ee_orn_ry = 0.
 
 class B2Z1PosForceRoughCfgPPO( LeggedRobotCfgPPO ):

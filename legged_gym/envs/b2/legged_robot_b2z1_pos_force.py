@@ -28,7 +28,7 @@ INDEX_EE_POS_RADIUS_CMD = 3
 INDEX_EE_POS_PITCH_CMD = 4
 INDEX_EE_POS_YAW_CMD = 5
 INDEX_EE_ROLL_CMD = 6
-INDEX_EE_PITCH_CMD =7
+INDEX_EE_PITCH_CMD = 7
 INDEX_EE_YAW_CMD = 8
 INDEX_EE_FORCE_X = 9
 INDEX_EE_FORCE_Y = 10
@@ -610,7 +610,8 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
         sphere_pose = gymapi.Transform(gymapi.Vec3(0, 0, 0), r=None)
         gymutil.draw_lines(sphere_geom_origin, self.gym, self.viewer, self.envs[0], sphere_pose)
 
-        axes_geom = gymutil.AxesGeometry(scale=0.2)
+        target_axes_geom = gymutil.AxesGeometry(scale=0.22)
+        current_axes_geom = gymutil.AxesGeometry(scale=0.16)
 
 
         forces_global = self.forces[:, self.gripper_idx, 0:3]
@@ -655,9 +656,24 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
             )
             gymutil.draw_lines(spherical_center_geom, self.gym, self.viewer, self.envs[i], sphere_pose_3) 
 
-            pose = gymapi.Transform(gymapi.Vec3(self.curr_ee_goal_cart_world[i, 0], self.curr_ee_goal_cart_world[i, 1], self.curr_ee_goal_cart_world[i, 2]), 
-                                    r=gymapi.Quat(self.ee_goal_orn_quat[i, 0], self.ee_goal_orn_quat[i, 1], self.ee_goal_orn_quat[i, 2], self.ee_goal_orn_quat[i, 3]))
-            gymutil.draw_lines(axes_geom, self.gym, self.viewer, self.envs[i], pose)
+            target_pose = gymapi.Transform(
+                gymapi.Vec3(
+                    self.curr_ee_goal_cart_world[i, 0],
+                    self.curr_ee_goal_cart_world[i, 1],
+                    self.curr_ee_goal_cart_world[i, 2],
+                ),
+                r=gymapi.Quat(
+                    self.ee_goal_orn_quat[i, 0],
+                    self.ee_goal_orn_quat[i, 1],
+                    self.ee_goal_orn_quat[i, 2],
+                    self.ee_goal_orn_quat[i, 3],
+                ),
+            )
+            gymutil.draw_lines(target_axes_geom, self.gym, self.viewer, self.envs[i], target_pose)
+
+            current_pose = gymapi.Transform(gymapi.Vec3(ee_pose[i, 0], ee_pose[i, 1], ee_pose[i, 2]),
+                                            r=gymapi.Quat(self.ee_orn[i, 0], self.ee_orn[i, 1], self.ee_orn[i, 2], self.ee_orn[i, 3]))
+            gymutil.draw_lines(current_axes_geom, self.gym, self.viewer, self.envs[i], current_pose)
 
     def _draw_ee_force(self):
         """ Draws visualizations for dubugging (slows down simulation a lot).
@@ -1011,6 +1027,9 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
         if self.cfg.env.teleop_mode and is_init:
             self.curr_ee_goal_sphere[:] = self.init_start_ee_sphere[:]
             self.commands[:, INDEX_EE_POS_RADIUS_CMD:(INDEX_EE_POS_YAW_CMD+1)] = self.curr_ee_goal_sphere.view(self.num_envs,3)
+            self.ee_start_orn_delta_rpy[:] = 0.0
+            self.curr_ee_goal_orn_delta_rpy[:] = 0.0
+            self.ee_goal_orn_delta_rpy[:] = 0.0
             return
         elif self.cfg.env.teleop_mode:
             return
@@ -1028,18 +1047,25 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
             if is_init:
                 if self.global_steps < 0 * 24 and not self.play:
                     self.ee_goal_orn_delta_rpy[env_ids, :] = 0
+                    self.curr_ee_goal_orn_delta_rpy[env_ids, :] = 0
+                    self.ee_start_orn_delta_rpy[env_ids, :] = 0
                     self.ee_start_sphere[env_ids] = self.init_start_ee_sphere[:]
                     self.ee_goal_sphere[env_ids] = self.init_start_ee_sphere[:]
                 else:
                     self.ee_goal_orn_delta_rpy[env_ids, :] = 0
+                    self.curr_ee_goal_orn_delta_rpy[env_ids, :] = 0
+                    self.ee_start_orn_delta_rpy[env_ids, :] = 0
                     self.ee_start_sphere[env_ids] = self.init_start_ee_sphere[:]
                     self.ee_goal_sphere[env_ids] = self.init_end_ee_sphere[:]
             else:
                 if self.global_steps < 0 * 24 and not self.play:
                     self.ee_goal_orn_delta_rpy[env_ids, :] = 0
+                    self.curr_ee_goal_orn_delta_rpy[env_ids, :] = 0
+                    self.ee_start_orn_delta_rpy[env_ids, :] = 0
                     self.ee_start_sphere[env_ids] = self.init_start_ee_sphere[:]
                     self.ee_goal_sphere[env_ids] = self.init_start_ee_sphere[:]
                 else:
+                    self.ee_start_orn_delta_rpy[env_ids] = self.curr_ee_goal_orn_delta_rpy[env_ids].clone()
                     self._resample_ee_goal_orn_once(env_ids)
                     self.ee_start_sphere[env_ids] = self.ee_goal_sphere[env_ids].clone()
                     for i in range(10):
@@ -1065,6 +1091,7 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
         if not self.cfg.env.teleop_mode:
             t = torch.clip(self.goal_timer / self.traj_timesteps, 0, 1)
             self.curr_ee_goal_sphere[:] = torch.lerp(self.ee_start_sphere, self.ee_goal_sphere, t[:, None])
+            self.curr_ee_goal_orn_delta_rpy[:] = torch.lerp(self.ee_start_orn_delta_rpy, self.ee_goal_orn_delta_rpy, t[:, None])
             self.commands[:, INDEX_EE_POS_RADIUS_CMD:(INDEX_EE_POS_YAW_CMD+1)] = self.curr_ee_goal_sphere.view(self.num_envs,3)
 
         self.curr_ee_goal_cart[:] = sphere2cart(self.curr_ee_goal_sphere)
@@ -1074,7 +1101,18 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
         
         default_yaw = torch.atan2(ee_goal_cart_yaw_global[:, 1], ee_goal_cart_yaw_global[:, 0])
         default_pitch = -self.curr_ee_goal_sphere[:, 1] + self.cfg.goal_ee.arm_induced_pitch
-        self.ee_goal_orn_quat = quat_from_euler_xyz(self.ee_goal_orn_delta_rpy[:, 0] + np.pi / 2, default_pitch + self.ee_goal_orn_delta_rpy[:, 1], self.ee_goal_orn_delta_rpy[:, 2] + default_yaw)
+        goal_roll = self.curr_ee_goal_orn_delta_rpy[:, 0] + np.pi / 2
+        goal_pitch = default_pitch + self.curr_ee_goal_orn_delta_rpy[:, 1]
+        goal_yaw = self.curr_ee_goal_orn_delta_rpy[:, 2] + default_yaw
+        self.curr_ee_goal_orn_rpy[:] = wrap_to_pi(torch.stack([goal_roll, goal_pitch, goal_yaw], dim=1))
+        self.ee_goal_orn_quat = quat_from_euler_xyz(
+            self.curr_ee_goal_orn_rpy[:, 0],
+            self.curr_ee_goal_orn_rpy[:, 1],
+            self.curr_ee_goal_orn_rpy[:, 2],
+        )
+        # Keep orientation commands yaw-invariant: policy observes the sampled
+        # delta from the default EE frame, while reward/drawing use world quat.
+        self.commands[:, INDEX_EE_ROLL_CMD:(INDEX_EE_YAW_CMD+1)] = self.curr_ee_goal_orn_delta_rpy.view(self.num_envs, 3)
         self.goal_timer += 1
         resample_id = (self.goal_timer > self.traj_total_timesteps).nonzero(as_tuple=False).flatten()
         
@@ -1099,6 +1137,9 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
 
         self.curr_ee_goal_cart[:] = self.key_command_ee_local_cart
         self.curr_ee_goal_sphere[:] = cart2sphere(self.curr_ee_goal_cart)
+        self.ee_start_orn_delta_rpy[:] = 0.0
+        self.curr_ee_goal_orn_delta_rpy[:] = 0.0
+        self.ee_goal_orn_delta_rpy[:] = 0.0
         self.ee_start_sphere[:] = self.curr_ee_goal_sphere
         self.ee_goal_sphere[:] = self.curr_ee_goal_sphere
         self.goal_timer[:] = 0
@@ -1559,6 +1600,9 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
         self.ee_goal_orn_euler = torch.zeros(self.num_envs, 3, device=self.device)
         self.ee_goal_orn_euler[:, 0] = np.pi / 2
         self.ee_goal_orn_quat = quat_from_euler_xyz(self.ee_goal_orn_euler[:, 0], self.ee_goal_orn_euler[:, 1], self.ee_goal_orn_euler[:, 2])
+        self.curr_ee_goal_orn_rpy = self.ee_goal_orn_euler.clone()
+        self.ee_start_orn_delta_rpy = torch.zeros(self.num_envs, 3, device=self.device)
+        self.curr_ee_goal_orn_delta_rpy = torch.zeros(self.num_envs, 3, device=self.device)
         self.ee_goal_orn_delta_rpy = torch.zeros(self.num_envs, 3, device=self.device)
 
         self.curr_ee_goal_cart = torch.zeros(self.num_envs, 3, device=self.device)
@@ -2194,6 +2238,13 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
        
         ee_pos_error = torch.sum(torch.abs(self.ee_pos - curr_ee_goal_cart_world_offset), dim=1)
         rew = torch.exp(-ee_pos_error/self.cfg.rewards.tracking_ee_sigma * 2)
+        return rew
+
+    def _reward_tracking_ee_orn(self):
+        quat_dot = torch.sum(self.ee_orn * self.ee_goal_orn_quat, dim=1)
+        quat_dot = torch.clamp(torch.abs(quat_dot), max=1.0)
+        orn_error = 2.0 * torch.acos(quat_dot)
+        rew = torch.exp(-orn_error / self.cfg.rewards.tracking_ee_orn_sigma * 2)
         return rew
     
     def _reward_lin_vel_z(self):
