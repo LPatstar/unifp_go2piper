@@ -1103,7 +1103,7 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
         
         default_yaw = torch.atan2(ee_goal_cart_yaw_global[:, 1], ee_goal_cart_yaw_global[:, 0])
         default_pitch = -self.curr_ee_goal_sphere[:, 1] + self.cfg.goal_ee.arm_induced_pitch
-        goal_roll = self.curr_ee_goal_orn_delta_rpy[:, 0] + np.pi / 2
+        goal_roll = self.curr_ee_goal_orn_delta_rpy[:, 0]
         goal_pitch = default_pitch + self.curr_ee_goal_orn_delta_rpy[:, 1]
         goal_yaw = self.curr_ee_goal_orn_delta_rpy[:, 2] + default_yaw
         self.curr_ee_goal_orn_rpy[:] = wrap_to_pi(torch.stack([goal_roll, goal_pitch, goal_yaw], dim=1))

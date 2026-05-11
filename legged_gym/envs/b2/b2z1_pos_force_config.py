@@ -60,7 +60,7 @@ class B2Z1PosForceRoughCfg( LeggedRobotCfg ):
             'z1_elbow': -1.5, # -0.63,
             'z1_wrist_angle': 0, # -0.84,
             'z1_forearm_roll': 0.0,
-            'z1_wrist_rotate': 1.57, # 0.0,
+            'z1_wrist_rotate': 0, # Modified for door manip: 1.57
             'z1_jointGripper': -0.785,
         }
         rand_yaw_range = np.pi/2
