@@ -2,13 +2,17 @@
 
 ## Project Identity
 
-This repository is a Go2+Piper-oriented fork of UniFP for whole-body position-force control in Isaac Gym.
+This repository is a UniFP-based loco-manipulation workspace for whole-body position-force control in Isaac Gym.
 
-Primary position-force tasks:
+The main project direction is to use UniFP's position-force controller as a low-level execution mode for legged manipulation, with B2+Z1 as the prioritized robot path, and build toward high-level loco-manipulation door-opening tasks.
+
+Current position-force tasks:
 - `b2z1_pos_force`
 - `go2_piper_pos_force`
 
-The repo is not a clean greenfield project. It keeps a large amount of upstream UniFP / B2+Z1 structure, and the Go2+Piper task is layered on top of that shared implementation.
+The Go2+Piper adaptation is an early side path and useful secondary robot mode, not the final identity of the repository.
+
+The repo is not a clean greenfield project. It keeps a large amount of upstream UniFP / B2+Z1 structure, and the B2+Z1 path should remain the default priority unless the user explicitly asks for Go2+Piper work.
 
 ## Environment Assumptions
 
@@ -92,6 +96,9 @@ Task registration:
 
 ## Architectural Notes
 
+- Treat UniFP position-force control as the low-level controller layer for future door-opening loco-manipulation work.
+- For new high-level task integration, assume B2+Z1 first unless the user explicitly requests Go2+Piper.
+- Do not frame repository-level changes as primarily a B2+Z1-to-Go2+Piper migration. That migration exists, but it is only one supporting thread.
 - `legged_robot_go2_piper_pos_force.py` is only a thin alias to the shared B2+Z1 environment class.
 - Real Go2+Piper behavior is split between:
   - Go2 config overrides in `go2_piper_pos_force_config.py`
@@ -156,6 +163,8 @@ Task registration:
 
 ## Working Rules For Future Changes
 
+- Preserve the broader door-opening loco-manipulation direction when updating docs, configs, or task structure.
+- Prefer B2+Z1 as the primary robot/task path for new high-level integration work unless the request says otherwise.
 - Preserve compatibility with the inherited B2+Z1 implementation. Any Go2+Piper change should avoid breaking the original B2+Z1 task, scripts, config expectations, or shared environment behavior unless an explicit compatibility break is requested.
 - When changing Go2 behavior, first decide whether it belongs in:
   - Go2 config overrides

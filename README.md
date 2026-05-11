@@ -1,8 +1,8 @@
-# UniFP Go2+Piper Fork
+# UniFP Loco-Manipulation Door Opening Workspace
 
 
 <div align="center">
-Go2+Piper-focused fork of the UniFP project
+UniFP-based low-level control workspace for legged loco-manipulation and door opening
 
 [[Website]](https://unified-force.github.io/)
 [[Arxiv]](https://arxiv.org/pdf/2505.20829)
@@ -20,19 +20,24 @@ Go2+Piper-focused fork of the UniFP project
 
 ## Overview
 
-This repository is a Go2+Piper-oriented fork of the original UniFP project. It keeps the reinforcement learning-based whole-body control framework from UniFP, while adapting the current codebase, robot assets, and training setup toward Go2+Piper unified position and force control in Isaac Gym.
+This repository is a UniFP-based workspace for building legged loco-manipulation door-opening capabilities in Isaac Gym. The main direction is to use UniFP's whole-body position-force controller as the low-level execution layer, with B2+Z1 as the prioritized robot/task path, and extend the project toward high-level door-opening interaction.
 
-The original UniFP project, paper, and website are linked above for method background. This fork is intended to be a practical workspace for Go2+Piper simulation training, evaluation, debugging, and further adaptation.
+The existing Go2+Piper work remains as a secondary robot adaptation and useful early-stage branch of the codebase, but the repository-level goal is not limited to migrating B2+Z1 behavior to Go2+Piper.
+
+The original UniFP project, paper, and website are linked above for method background. This workspace is intended for simulation training, evaluation, debugging, and integration work toward whole-body loco-manipulation.
 
 **Key Features**:
-- Go2+Piper whole-body control setup built on UniFP
+- UniFP whole-body position-force control as a low-level loco-manipulation executor
+- B2+Z1-first task path for future door-opening integration
 - Unified policy learning for position and force control
+- Door-opening loco-manipulation as the main project direction
 - PPO-based reinforcement learning training in Isaac Gym
-- Go2+Piper-specific robot assets, configs, and play scripts
+- Secondary Go2+Piper robot adaptation, configs, and play scripts
 - Keyboard-driven keyplay tooling for manual policy inspection
 
 ## TODO
 - [x] Release UniFP training pipeline
+- [ ] Build high-level door-opening loco-manipulation task integration
 - [ ] Release sim2real with ROS2
 - [ ] Release sim2sim in MuJoCo
 - [ ] Release imitation learing data collection pipeline
@@ -49,8 +54,8 @@ The original UniFP project, paper, and website are linked above for method backg
 
 1. **Clone this project**
    ```bash
-   git clone https://github.com/LPatstar/unifp_go2piper.git
-   cd unifp_go2piper
+   git clone https://github.com/LPatstar/doorgym_unifp.git
+   cd doorgym_unifp
    ```
 
 2. **Set up the environment**
@@ -307,4 +312,4 @@ Notes:
 
 ## Upstream Reference
 
-This repository is derived from the original UniFP project. If you are looking for the original paper/project context rather than this Go2+Piper-oriented fork, use the links at the top of this README.
+This repository is derived from the original UniFP project. If you are looking for the original paper/project context, use the links at the top of this README.

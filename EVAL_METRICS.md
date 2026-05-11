@@ -204,23 +204,29 @@ python eval_posforce.py --load_run=<run_name> --headless
 含义：
 
 - 某个 reach 场景结束前的最后一个时间窗内
-- 若 EE 误差低于阈值，则记为成功
+- 当前 6D 评测下，主 success 口径是 `XYZ+RPY`：位置误差和姿态误差都低于阈值，才记为成功
+- 报告中同时保留 `XYZ-only` 旧口径，方便区分是位置没跟上，还是姿态没跟上
 
 默认主要阈值：
 
 - `5 cm` 左右用于纯位置场景
 - `6 cm` 左右用于 hybrid 补偿场景
+- `10 deg` 用于 EE RPY 成功阈值
 
 解读：
 
 - 更适合看“最终是否到位”
 - 对最终是否能用很敏感
+- 如果 `XYZ-only` 成功率高但 `XYZ+RPY` 成功率低，主要问题在姿态跟踪
 
 ### 5.2 EE Tracking Score
 
 含义：
 
-- 由 EE 跟踪误差映射成 `0-100%`
+- 对有 EE tracking 的 case，主 tracking score 是 `XYZ+RPY` 口径
+- XYZ score 由 EE 位置 RMSE 映射成 `0-100%`
+- RPY score 由 EE RPY RMSE 映射成 `0-100%`
+- `XYZ+RPY` score 取两者中的较低值，避免“位置好但姿态差”或“姿态好但位置差”被平均数掩盖
 - 误差越小，分数越高
 
 解读：
@@ -228,6 +234,7 @@ python eval_posforce.py --load_run=<run_name> --headless
 - 比 success rate 更平滑
 - 更适合比较“两个模型都能到，但谁更准”
 - 当前脚本中，tracking score 使用的 RMSE 与 success 一样，只看每个 scripted scenario 结束前最后 `0.25 s` 的 tracking 窗口，不把刚切目标后的过渡误差混进去
+- 报告中同时显示 `EE XYZ+RPY tracking` 和 `EE XYZ-only tracking` 两行，前者用于 6D 目标，后者等价于旧版只看 XYZ 的口径
 
 ### 5.3 EE RMSE
 
@@ -268,7 +275,8 @@ python eval_posforce.py --load_run=<run_name> --headless
 统计窗口：
 
 - 与 EE XYZ RMSE 一样，只统计每个 scripted scenario 的最后 `0.25 s` tracking 窗口
-- 这个指标只是已有 tracking case 的附加读数，不是一个新的 task，也不改变现有 case score 权重
+- 这个指标只是已有 tracking case 的附加读数，不是一个新的 task
+- 对有 EE tracking 的 case，主 success / tracking score / case score 会使用 `XYZ+RPY` 口径；报告中另有 `XYZ-only` 旧口径作为诊断对照
 
 解读：
 
