@@ -6,7 +6,7 @@ import sys
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 
@@ -15,7 +15,7 @@ sys.path.append(unitree_rl_gym_path)
 
 import isaacgym  # noqa: F401
 from isaacgym import gymutil
-from isaacgym.torch_utils import get_euler_xyz, quat_apply
+from isaacgym.torch_utils import get_euler_xyz, quat_apply, quat_from_euler_xyz
 import torch
 
 from legged_gym import LEGGED_GYM_ROOT_DIR
@@ -23,8 +23,10 @@ from legged_gym.envs import *
 from legged_gym.envs.b2.legged_robot_b2z1_pos_force import (
     INDEX_BASE_FORCE_X,
     INDEX_BASE_FORCE_Z,
+    INDEX_EE_ROLL_CMD,
     INDEX_EE_FORCE_X,
     INDEX_EE_FORCE_Z,
+    INDEX_EE_YAW_CMD,
 )
 from legged_gym.utils import task_registry
 from legged_gym.utils.helpers import class_to_dict, get_load_path, print_env_control_gains, set_seed
@@ -32,6 +34,38 @@ from legged_gym.utils.isaacgym_utils import sphere2cart
 
 
 TRACKING_WINDOW_S = 0.25
+EE_RPY_SUCCESS_THRESHOLD_RAD = math.radians(10.0)
+EE_RPY_SCORE_GOOD_RAD = math.radians(5.0)
+EE_RPY_SCORE_BAD_RAD = math.radians(30.0)
+EE_TRACKING_PRIMARY_METRICS = {"nominal_ee_error", "compensated_ee_error"}
+POSE_VARIANT_DEFAULT = "default"
+POSE_VARIANT_RANDOM_RPY = "random_rpy"
+EE_TRACKING_CASE_CONFIG = {
+    "position_only": {
+        "primary_metric": "nominal_ee_error",
+        "primary_label": "Nominal EE",
+        "xyz_score_good": 0.03,
+        "xyz_score_bad": 0.12,
+        "default_tags": ("track",),
+        "random_rpy_tags": ("track_rpy",),
+    },
+    "hybrid_force_position": {
+        "primary_metric": "compensated_ee_error",
+        "primary_label": "Compensated EE",
+        "xyz_score_good": 0.03,
+        "xyz_score_bad": 0.14,
+        "default_tags": ("force_track",),
+        "random_rpy_tags": ("force_track_rpy",),
+    },
+    "mixed_whole_body": {
+        "primary_metric": "compensated_ee_error",
+        "primary_label": "Compensated EE",
+        "xyz_score_good": 0.04,
+        "xyz_score_bad": 0.16,
+        "default_tags": ("reach_move", "reach_force", "move_disturbance"),
+        "random_rpy_tags": ("reach_move_rpy", "reach_force_rpy", "move_disturbance_rpy"),
+    },
+}
 LAST_WINDOW_RMSE_METRICS = (
     "nominal_ee_error",
     "compensated_ee_error",
@@ -56,6 +90,7 @@ class Phase:
     base_force_cmd_local: np.ndarray
     ee_ext_force_local: np.ndarray
     base_ext_force_local: np.ndarray
+    ee_orn_delta_rpy: np.ndarray
     collect: bool = True
     primary_collect: bool = True
     tag: str = "main"
@@ -67,6 +102,7 @@ class Scenario:
     phases: List[Phase]
     primary_metric: str
     success_threshold: float
+    pose_variant: str = POSE_VARIANT_DEFAULT
 
 
 def get_eval_args():
@@ -214,6 +250,7 @@ def phase(
     base_force_cmd_local=(0.0, 0.0, 0.0),
     ee_ext_force_local=(0.0, 0.0, 0.0),
     base_ext_force_local=(0.0, 0.0, 0.0),
+    ee_orn_delta_rpy=(0.0, 0.0, 0.0),
     collect=True,
     primary_collect=True,
     tag="main",
@@ -226,13 +263,147 @@ def phase(
         base_force_cmd_local=np.asarray(base_force_cmd_local, dtype=np.float32),
         ee_ext_force_local=np.asarray(ee_ext_force_local, dtype=np.float32),
         base_ext_force_local=np.asarray(base_ext_force_local, dtype=np.float32),
+        ee_orn_delta_rpy=np.asarray(ee_orn_delta_rpy, dtype=np.float32),
         collect=collect,
         primary_collect=primary_collect,
         tag=tag,
     )
 
 
-def build_scenarios(home_local: np.ndarray) -> Dict[str, List[Scenario]]:
+def make_force_probe_scenario(
+    name: str,
+    target_local: np.ndarray,
+    force_local,
+    primary_metric: str = "estimator_ee_force_mae",
+    success_threshold: float = 3.0,
+) -> Scenario:
+    return Scenario(
+        name=name,
+        primary_metric=primary_metric,
+        success_threshold=success_threshold,
+        phases=[
+            phase(0.6, target_local, collect=False, tag="warmup"),
+            phase(0.5, target_local, primary_collect=False, tag="zero_probe"),
+            phase(
+                1.2,
+                target_local,
+                ee_ext_force_local=force_local,
+                tag="force_probe",
+            ),
+        ],
+    )
+
+
+def build_go2_arm_force_estimation_scenarios(home_local: np.ndarray) -> List[Scenario]:
+    return [
+        make_force_probe_scenario("arm_force_x_probe", home_local, (10.0, 0.0, 0.0)),
+        make_force_probe_scenario("arm_force_z_probe", home_local, (0.0, 0.0, -8.0)),
+        make_force_probe_scenario("arm_force_xy_probe", home_local, (6.0, -6.0, 0.0)),
+    ]
+
+
+def build_b2z1_arm_force_estimation_scenarios(home_local: np.ndarray, seed: Optional[int]) -> List[Scenario]:
+    rng = np.random.default_rng(1 if seed is None else seed)
+    position_offsets = rng.uniform(
+        low=np.array([0.02, -0.10, -0.07], dtype=np.float32),
+        high=np.array([0.12, 0.10, 0.08], dtype=np.float32),
+        size=(5, 3),
+    ).astype(np.float32)
+    target_positions = [home_local + offset for offset in position_offsets]
+
+    scenarios = []
+    axis_specs = [
+        ("x", np.array([-60.0, -30.0, -15.0, 30.0, 60.0], dtype=np.float32)),
+        ("y", np.array([-40.0, -20.0, -10.0, 20.0, 40.0], dtype=np.float32)),
+        ("z", np.array([-40.0, -20.0, -10.0, 20.0, 40.0], dtype=np.float32)),
+    ]
+    axis_index = {"x": 0, "y": 1, "z": 2}
+    for axis_name, force_values in axis_specs:
+        for position_idx, (target_local, force_value) in enumerate(zip(target_positions, force_values), start=1):
+            force_local = np.zeros(3, dtype=np.float32)
+            force_local[axis_index[axis_name]] = force_value
+            scenarios.append(
+                make_force_probe_scenario(
+                    f"b2z1_arm_force_{axis_name}_pos{position_idx}_{force_value:+.0f}n",
+                    target_local,
+                    force_local,
+                )
+            )
+    return scenarios
+
+
+def build_arm_force_estimation_scenarios(home_local: np.ndarray, task_name: str, seed: Optional[int]) -> List[Scenario]:
+    if task_name == "b2z1_pos_force":
+        return build_b2z1_arm_force_estimation_scenarios(home_local, seed)
+    return build_go2_arm_force_estimation_scenarios(home_local)
+
+
+def default_ee_orn_ranges(task_name: str) -> Dict[str, List[float]]:
+    limit = 0.5 if task_name == "b2z1_pos_force" else 0.35
+    return {
+        "delta_orn_r": [-limit, limit],
+        "delta_orn_p": [-limit, limit],
+        "delta_orn_y": [-limit, limit],
+    }
+
+
+def sample_ee_orn_delta(rng: np.random.Generator, ee_orn_ranges: Dict[str, List[float]]) -> np.ndarray:
+    return np.asarray(
+        [
+            rng.uniform(ee_orn_ranges["delta_orn_r"][0], ee_orn_ranges["delta_orn_r"][1]),
+            rng.uniform(ee_orn_ranges["delta_orn_p"][0], ee_orn_ranges["delta_orn_p"][1]),
+            rng.uniform(ee_orn_ranges["delta_orn_y"][0], ee_orn_ranges["delta_orn_y"][1]),
+        ],
+        dtype=np.float32,
+    )
+
+
+def copy_phase_with_random_rpy(ph: Phase, ee_orn_delta_rpy: np.ndarray) -> Phase:
+    return Phase(
+        duration_s=ph.duration_s,
+        ee_target_local=ph.ee_target_local.copy(),
+        base_cmd=ph.base_cmd.copy(),
+        ee_force_cmd_local=ph.ee_force_cmd_local.copy(),
+        base_force_cmd_local=ph.base_force_cmd_local.copy(),
+        ee_ext_force_local=ph.ee_ext_force_local.copy(),
+        base_ext_force_local=ph.base_ext_force_local.copy(),
+        ee_orn_delta_rpy=ee_orn_delta_rpy.copy(),
+        collect=ph.collect,
+        primary_collect=ph.primary_collect,
+        tag=f"{ph.tag}_rpy",
+    )
+
+
+def make_random_rpy_tracking_variants(
+    scenarios: List[Scenario],
+    rng: np.random.Generator,
+    ee_orn_ranges: Dict[str, List[float]],
+) -> List[Scenario]:
+    random_scenarios = []
+    for scenario in scenarios:
+        ee_orn_delta_rpy = sample_ee_orn_delta(rng, ee_orn_ranges)
+        random_scenarios.append(
+            Scenario(
+                name=f"{scenario.name}_random_rpy",
+                primary_metric=scenario.primary_metric,
+                success_threshold=scenario.success_threshold,
+                phases=[copy_phase_with_random_rpy(ph, ee_orn_delta_rpy) for ph in scenario.phases],
+                pose_variant=POSE_VARIANT_RANDOM_RPY,
+            )
+        )
+    return random_scenarios
+
+
+def build_scenarios(
+    home_local: np.ndarray,
+    task_name: str,
+    seed: Optional[int],
+    ee_orn_ranges: Optional[Dict[str, List[float]]] = None,
+) -> Dict[str, List[Scenario]]:
+    if ee_orn_ranges is None:
+        ee_orn_ranges = default_ee_orn_ranges(task_name)
+    tracking_rng = np.random.default_rng((1 if seed is None else seed) + 7919)
+
     forward_high = home_local + np.array([0.10, 0.00, 0.08], dtype=np.float32)
     forward_low = home_local + np.array([0.08, 0.00, -0.06], dtype=np.float32)
     left_reach = home_local + np.array([0.05, 0.10, 0.02], dtype=np.float32)
@@ -242,142 +413,128 @@ def build_scenarios(home_local: np.ndarray) -> Dict[str, List[Scenario]]:
     hybrid_left = home_local + np.array([0.05, 0.08, 0.03], dtype=np.float32)
     hybrid_right = home_local + np.array([0.05, -0.08, 0.00], dtype=np.float32)
 
+    position_only_scenarios = [
+        Scenario(
+            name="pos_forward_high",
+            primary_metric="nominal_ee_error",
+            success_threshold=0.05,
+            phases=[
+                phase(0.6, home_local, collect=False, tag="warmup"),
+                phase(2.0, forward_high, tag="track"),
+            ],
+        ),
+        Scenario(
+            name="pos_forward_low",
+            primary_metric="nominal_ee_error",
+            success_threshold=0.05,
+            phases=[
+                phase(0.6, home_local, collect=False, tag="warmup"),
+                phase(2.0, forward_low, tag="track"),
+            ],
+        ),
+        Scenario(
+            name="pos_left_reach",
+            primary_metric="nominal_ee_error",
+            success_threshold=0.05,
+            phases=[
+                phase(0.6, home_local, collect=False, tag="warmup"),
+                phase(2.0, left_reach, tag="track"),
+            ],
+        ),
+        Scenario(
+            name="pos_right_reach",
+            primary_metric="nominal_ee_error",
+            success_threshold=0.05,
+            phases=[
+                phase(0.6, home_local, collect=False, tag="warmup"),
+                phase(2.0, right_reach, tag="track"),
+            ],
+        ),
+    ]
+    hybrid_force_position_scenarios = [
+        Scenario(
+            name="hybrid_front_x_force",
+            primary_metric="compensated_ee_error",
+            success_threshold=0.06,
+            phases=[
+                phase(0.6, home_local, collect=False, tag="warmup"),
+                phase(0.8, hybrid_front, primary_collect=False, tag="pre_force"),
+                phase(
+                    1.4,
+                    hybrid_front,
+                    ee_force_cmd_local=(10.0, 0.0, 0.0),
+                    ee_ext_force_local=(10.0, 0.0, 0.0),
+                    tag="force_track",
+                ),
+            ],
+        ),
+        Scenario(
+            name="hybrid_left_z_force",
+            primary_metric="compensated_ee_error",
+            success_threshold=0.06,
+            phases=[
+                phase(0.6, home_local, collect=False, tag="warmup"),
+                phase(0.8, hybrid_left, primary_collect=False, tag="pre_force"),
+                phase(
+                    1.4,
+                    hybrid_left,
+                    ee_force_cmd_local=(0.0, 0.0, -8.0),
+                    ee_ext_force_local=(0.0, 0.0, -8.0),
+                    tag="force_track",
+                ),
+            ],
+        ),
+        Scenario(
+            name="hybrid_right_xy_force",
+            primary_metric="compensated_ee_error",
+            success_threshold=0.06,
+            phases=[
+                phase(0.6, home_local, collect=False, tag="warmup"),
+                phase(0.8, hybrid_right, primary_collect=False, tag="pre_force"),
+                phase(
+                    1.4,
+                    hybrid_right,
+                    ee_force_cmd_local=(6.0, -6.0, 0.0),
+                    ee_ext_force_local=(6.0, -6.0, 0.0),
+                    tag="force_track",
+                ),
+            ],
+        ),
+    ]
+    mixed_whole_body_scenarios = [
+        Scenario(
+            name="mixed_whole_body_sequence",
+            primary_metric="compensated_ee_error",
+            success_threshold=0.08,
+            phases=[
+                phase(0.8, home_local, collect=False, tag="warmup"),
+                phase(1.0, left_reach, base_cmd=(0.20, 0.00, 0.0), tag="reach_move"),
+                phase(
+                    1.2,
+                    forward_high,
+                    base_cmd=(0.18, 0.08, 0.0),
+                    ee_force_cmd_local=(8.0, 0.0, 0.0),
+                    ee_ext_force_local=(8.0, 0.0, 0.0),
+                    tag="reach_force",
+                ),
+                phase(
+                    1.2,
+                    right_reach,
+                    base_cmd=(0.10, -0.12, 0.15),
+                    base_force_cmd_local=(3.0, 0.0, 0.0),
+                    base_ext_force_local=(3.0, 0.0, 0.0),
+                    tag="move_disturbance",
+                ),
+            ],
+        ),
+    ]
+
     scenarios = {
-        "position_only": [
-            Scenario(
-                name="pos_forward_high",
-                primary_metric="nominal_ee_error",
-                success_threshold=0.05,
-                phases=[
-                    phase(0.6, home_local, collect=False, tag="warmup"),
-                    phase(2.0, forward_high, tag="track"),
-                ],
-            ),
-            Scenario(
-                name="pos_forward_low",
-                primary_metric="nominal_ee_error",
-                success_threshold=0.05,
-                phases=[
-                    phase(0.6, home_local, collect=False, tag="warmup"),
-                    phase(2.0, forward_low, tag="track"),
-                ],
-            ),
-            Scenario(
-                name="pos_left_reach",
-                primary_metric="nominal_ee_error",
-                success_threshold=0.05,
-                phases=[
-                    phase(0.6, home_local, collect=False, tag="warmup"),
-                    phase(2.0, left_reach, tag="track"),
-                ],
-            ),
-            Scenario(
-                name="pos_right_reach",
-                primary_metric="nominal_ee_error",
-                success_threshold=0.05,
-                phases=[
-                    phase(0.6, home_local, collect=False, tag="warmup"),
-                    phase(2.0, right_reach, tag="track"),
-                ],
-            ),
-        ],
-        "hybrid_force_position": [
-            Scenario(
-                name="hybrid_front_x_force",
-                primary_metric="compensated_ee_error",
-                success_threshold=0.06,
-                phases=[
-                    phase(0.6, home_local, collect=False, tag="warmup"),
-                    phase(0.8, hybrid_front, primary_collect=False, tag="pre_force"),
-                    phase(
-                        1.4,
-                        hybrid_front,
-                        ee_force_cmd_local=(10.0, 0.0, 0.0),
-                        ee_ext_force_local=(10.0, 0.0, 0.0),
-                        tag="force_track",
-                    ),
-                ],
-            ),
-            Scenario(
-                name="hybrid_left_z_force",
-                primary_metric="compensated_ee_error",
-                success_threshold=0.06,
-                phases=[
-                    phase(0.6, home_local, collect=False, tag="warmup"),
-                    phase(0.8, hybrid_left, primary_collect=False, tag="pre_force"),
-                    phase(
-                        1.4,
-                        hybrid_left,
-                        ee_force_cmd_local=(0.0, 0.0, -8.0),
-                        ee_ext_force_local=(0.0, 0.0, -8.0),
-                        tag="force_track",
-                    ),
-                ],
-            ),
-            Scenario(
-                name="hybrid_right_xy_force",
-                primary_metric="compensated_ee_error",
-                success_threshold=0.06,
-                phases=[
-                    phase(0.6, home_local, collect=False, tag="warmup"),
-                    phase(0.8, hybrid_right, primary_collect=False, tag="pre_force"),
-                    phase(
-                        1.4,
-                        hybrid_right,
-                        ee_force_cmd_local=(6.0, -6.0, 0.0),
-                        ee_ext_force_local=(6.0, -6.0, 0.0),
-                        tag="force_track",
-                    ),
-                ],
-            ),
-        ],
-        "arm_force_estimation": [
-            Scenario(
-                name="arm_force_x_probe",
-                primary_metric="estimator_ee_force_mae",
-                success_threshold=3.0,
-                phases=[
-                    phase(0.6, home_local, collect=False, tag="warmup"),
-                    phase(0.5, home_local, primary_collect=False, tag="zero_probe"),
-                    phase(
-                        1.2,
-                        home_local,
-                        ee_ext_force_local=(10.0, 0.0, 0.0),
-                        tag="force_probe",
-                    ),
-                ],
-            ),
-            Scenario(
-                name="arm_force_z_probe",
-                primary_metric="estimator_ee_force_mae",
-                success_threshold=3.0,
-                phases=[
-                    phase(0.6, home_local, collect=False, tag="warmup"),
-                    phase(0.5, home_local, primary_collect=False, tag="zero_probe"),
-                    phase(
-                        1.2,
-                        home_local,
-                        ee_ext_force_local=(0.0, 0.0, -8.0),
-                        tag="force_probe",
-                    ),
-                ],
-            ),
-            Scenario(
-                name="arm_force_xy_probe",
-                primary_metric="estimator_ee_force_mae",
-                success_threshold=3.0,
-                phases=[
-                    phase(0.6, home_local, collect=False, tag="warmup"),
-                    phase(0.5, home_local, primary_collect=False, tag="zero_probe"),
-                    phase(
-                        1.2,
-                        home_local,
-                        ee_ext_force_local=(6.0, -6.0, 0.0),
-                        tag="force_probe",
-                    ),
-                ],
-            ),
-        ],
+        "position_only": position_only_scenarios
+        + make_random_rpy_tracking_variants(position_only_scenarios, tracking_rng, ee_orn_ranges),
+        "hybrid_force_position": hybrid_force_position_scenarios
+        + make_random_rpy_tracking_variants(hybrid_force_position_scenarios, tracking_rng, ee_orn_ranges),
+        "arm_force_estimation": build_arm_force_estimation_scenarios(home_local, task_name, seed),
         "base_force_estimation": [
             Scenario(
                 name="base_force_x_probe",
@@ -470,33 +627,8 @@ def build_scenarios(home_local: np.ndarray) -> Dict[str, List[Scenario]]:
                 ],
             ),
         ],
-        "mixed_whole_body": [
-            Scenario(
-                name="mixed_whole_body_sequence",
-                primary_metric="compensated_ee_error",
-                success_threshold=0.08,
-                phases=[
-                    phase(0.8, home_local, collect=False, tag="warmup"),
-                    phase(1.0, left_reach, base_cmd=(0.20, 0.00, 0.0), tag="reach_move"),
-                    phase(
-                        1.2,
-                        forward_high,
-                        base_cmd=(0.18, 0.08, 0.0),
-                        ee_force_cmd_local=(8.0, 0.0, 0.0),
-                        ee_ext_force_local=(8.0, 0.0, 0.0),
-                        tag="reach_force",
-                    ),
-                    phase(
-                        1.2,
-                        right_reach,
-                        base_cmd=(0.10, -0.12, 0.15),
-                        base_force_cmd_local=(3.0, 0.0, 0.0),
-                        base_ext_force_local=(3.0, 0.0, 0.0),
-                        tag="move_disturbance",
-                    ),
-                ],
-            ),
-        ],
+        "mixed_whole_body": mixed_whole_body_scenarios
+        + make_random_rpy_tracking_variants(mixed_whole_body_scenarios, tracking_rng, ee_orn_ranges),
     }
     return scenarios
 
@@ -518,6 +650,38 @@ def sync_force_commands(env):
     env.commands[:, INDEX_BASE_FORCE_X:(INDEX_BASE_FORCE_Z + 1)] = env.current_Fxyz_base_cmd
 
 
+def wrap_to_pi_tensor(values: torch.Tensor) -> torch.Tensor:
+    return torch.atan2(torch.sin(values), torch.cos(values))
+
+
+def apply_profile_ee_orientation(env, profile: Phase):
+    num_envs = env.num_envs
+    device = env.device
+    ee_orn_delta_rpy = torch.tensor(
+        profile.ee_orn_delta_rpy,
+        device=device,
+        dtype=torch.float,
+    ).unsqueeze(0).repeat(num_envs, 1)
+
+    env.ee_start_orn_delta_rpy[:, :] = ee_orn_delta_rpy
+    env.curr_ee_goal_orn_delta_rpy[:, :] = ee_orn_delta_rpy
+    env.ee_goal_orn_delta_rpy[:, :] = ee_orn_delta_rpy
+
+    ee_goal_cart_yaw_global = quat_apply(env.base_yaw_quat, env.curr_ee_goal_cart)
+    default_yaw = torch.atan2(ee_goal_cart_yaw_global[:, 1], ee_goal_cart_yaw_global[:, 0])
+    default_pitch = -env.curr_ee_goal_sphere[:, 1] + env.cfg.goal_ee.arm_induced_pitch
+    goal_roll = ee_orn_delta_rpy[:, 0] + np.pi / 2
+    goal_pitch = default_pitch + ee_orn_delta_rpy[:, 1]
+    goal_yaw = default_yaw + ee_orn_delta_rpy[:, 2]
+    env.curr_ee_goal_orn_rpy[:] = wrap_to_pi_tensor(torch.stack([goal_roll, goal_pitch, goal_yaw], dim=1))
+    env.ee_goal_orn_quat = quat_from_euler_xyz(
+        env.curr_ee_goal_orn_rpy[:, 0],
+        env.curr_ee_goal_orn_rpy[:, 1],
+        env.curr_ee_goal_orn_rpy[:, 2],
+    )
+    env.commands[:, INDEX_EE_ROLL_CMD:(INDEX_EE_YAW_CMD + 1)] = ee_orn_delta_rpy
+
+
 def apply_profile(env, profile: Phase):
     num_envs = env.num_envs
     device = env.device
@@ -526,6 +690,7 @@ def apply_profile(env, profile: Phase):
     ee_target = torch.tensor(profile.ee_target_local, device=device, dtype=torch.float).unsqueeze(0).repeat(num_envs, 1)
     env._set_key_command_ee_goal_local_cart(env_ids, ee_target)
     env._update_key_command_ee_goal()
+    apply_profile_ee_orientation(env, profile)
 
     base_cmd = torch.tensor(profile.base_cmd, device=device, dtype=torch.float).unsqueeze(0).repeat(num_envs, 1)
     env.commands[:, 0:3] = base_cmd
@@ -671,7 +836,27 @@ def stack_or_empty(values: List[np.ndarray], num_envs: int) -> np.ndarray:
     return np.stack(values, axis=0)
 
 
+def tracking_tags_for_case(case_name: str, pose_variant: str) -> tuple:
+    case_cfg = EE_TRACKING_CASE_CONFIG.get(case_name)
+    if case_cfg is None:
+        return ()
+    if pose_variant == POSE_VARIANT_RANDOM_RPY:
+        return case_cfg["random_rpy_tags"]
+    return case_cfg["default_tags"]
+
+
+def metric_values_for_tags(tags: Dict[str, Dict[str, List[float]]], tag_names, metric_name: str) -> List[float]:
+    values = []
+    for tag_name in tag_names:
+        values.extend(tags[tag_name].get(metric_name, []))
+    return values
+
+
 def metric_values_for_case(case_name: str, tags: Dict[str, Dict[str, List[float]]], all_metrics: Dict[str, List[float]], metric_name: str) -> List[float]:
+    if case_name in EE_TRACKING_CASE_CONFIG:
+        values = metric_values_for_tags(tags, tracking_tags_for_case(case_name, POSE_VARIANT_DEFAULT), metric_name)
+        if values:
+            return values
     if case_name == "position_only":
         return tags["track"].get(metric_name, all_metrics[metric_name])
     if case_name == "hybrid_force_position":
@@ -682,6 +867,18 @@ def metric_values_for_case(case_name: str, tags: Dict[str, Dict[str, List[float]
         if metric_name in ("base_nominal_vel_error", "base_comp_vel_error"):
             return tags["disturbance"].get(metric_name, all_metrics[metric_name])
     return all_metrics[metric_name]
+
+
+def rmse_values_for_tracking_variant(case_name: str, case_records: Dict, metric_name: str, pose_variant: str) -> List[float]:
+    tag_names = tracking_tags_for_case(case_name, pose_variant)
+    last_window_values = metric_values_for_tags(
+        case_records.get("last_window_tags", defaultdict(lambda: defaultdict(list))),
+        tag_names,
+        metric_name,
+    )
+    if last_window_values:
+        return last_window_values
+    return metric_values_for_tags(case_records["tags"], tag_names, metric_name)
 
 
 def rmse_values_for_case(case_name: str, case_records: Dict, metric_name: str) -> List[float]:
@@ -746,6 +943,75 @@ def compute_segment_success(error_matrix: np.ndarray, threshold: float, last_win
     return successes
 
 
+def compute_segment_joint_success(
+    xyz_error_matrix: np.ndarray,
+    xyz_threshold: float,
+    rpy_error_matrix: np.ndarray,
+    rpy_threshold: float,
+    last_window_steps: int,
+) -> List[float]:
+    if xyz_error_matrix.size == 0 or rpy_error_matrix.size == 0:
+        return []
+    successes = []
+    num_envs = min(xyz_error_matrix.shape[1], rpy_error_matrix.shape[1])
+    for env_idx in range(num_envs):
+        xyz_errors = xyz_error_matrix[:, env_idx]
+        rpy_errors = rpy_error_matrix[:, env_idx]
+        xyz_errors = xyz_errors[~np.isnan(xyz_errors)]
+        rpy_errors = rpy_errors[~np.isnan(rpy_errors)]
+        if xyz_errors.size == 0 or rpy_errors.size == 0:
+            successes.append(0.0)
+            continue
+        xyz_window = xyz_errors[-last_window_steps:] if xyz_errors.size >= last_window_steps else xyz_errors
+        rpy_window = rpy_errors[-last_window_steps:] if rpy_errors.size >= last_window_steps else rpy_errors
+        successes.append(float(np.mean(xyz_window) < xyz_threshold and np.mean(rpy_window) < rpy_threshold))
+    return successes
+
+
+def percentage_from_flags(flags: List[float]) -> float:
+    return percentage(sum(flags), len(flags)) if flags else float("nan")
+
+
+def summarize_tracking_variant(case_name: str, case_records: Dict, pose_variant: str) -> Optional[Dict[str, float]]:
+    case_cfg = EE_TRACKING_CASE_CONFIG.get(case_name)
+    if case_cfg is None:
+        return None
+
+    xyz_success_flags = case_records["pose_segment_success"].get(pose_variant, [])
+    rpy_success_flags = case_records["pose_segment_ee_rpy_success"].get(pose_variant, [])
+    xyz_rpy_success_flags = case_records["pose_segment_ee_xyz_rpy_success"].get(pose_variant, [])
+    if not xyz_success_flags and not rpy_success_flags and not xyz_rpy_success_flags:
+        return None
+
+    primary_metric = case_cfg["primary_metric"]
+    primary_rmse_m = rms_or_nan(rmse_values_for_tracking_variant(case_name, case_records, primary_metric, pose_variant))
+    rpy_rmse_rad = rms_or_nan(rmse_values_for_tracking_variant(case_name, case_records, "ee_rpy_error_norm", pose_variant))
+    roll_rmse_rad = rms_or_nan(rmse_values_for_tracking_variant(case_name, case_records, "ee_roll_error", pose_variant))
+    pitch_rmse_rad = rms_or_nan(rmse_values_for_tracking_variant(case_name, case_records, "ee_pitch_error", pose_variant))
+    yaw_rmse_rad = rms_or_nan(rmse_values_for_tracking_variant(case_name, case_records, "ee_yaw_error", pose_variant))
+    xyz_score = error_to_score(primary_rmse_m, case_cfg["xyz_score_good"], case_cfg["xyz_score_bad"])
+    rpy_score = error_to_score(rpy_rmse_rad, EE_RPY_SCORE_GOOD_RAD, EE_RPY_SCORE_BAD_RAD)
+
+    return {
+        "pose_variant": pose_variant,
+        "primary_metric": primary_metric,
+        "primary_ee_rmse_label": case_cfg["primary_label"],
+        "primary_ee_rmse_cm": primary_rmse_m * 100.0 if not math.isnan(primary_rmse_m) else float("nan"),
+        "ee_rpy_rmse_rad": rpy_rmse_rad,
+        "ee_rpy_rmse_deg": math.degrees(rpy_rmse_rad) if not math.isnan(rpy_rmse_rad) else float("nan"),
+        "ee_roll_rmse_deg": math.degrees(roll_rmse_rad) if not math.isnan(roll_rmse_rad) else float("nan"),
+        "ee_pitch_rmse_deg": math.degrees(pitch_rmse_rad) if not math.isnan(pitch_rmse_rad) else float("nan"),
+        "ee_yaw_rmse_deg": math.degrees(yaw_rmse_rad) if not math.isnan(yaw_rmse_rad) else float("nan"),
+        "xyz_only_success_rate_pct": percentage_from_flags(xyz_success_flags),
+        "ee_rpy_success_rate_pct": percentage_from_flags(rpy_success_flags),
+        "ee_xyz_rpy_success_rate_pct": percentage_from_flags(xyz_rpy_success_flags),
+        "xyz_only_tracking_score_pct": xyz_score,
+        "ee_rpy_tracking_score_pct": rpy_score,
+        "tracking_score_pct": min(xyz_score, rpy_score),
+        "sample_count": len(xyz_success_flags),
+    }
+
+
 def summarize_case(case_name: str, case_records: Dict, dt: float) -> Dict[str, float]:
     all_metrics = case_records["all"]
     tags = case_records["tags"]
@@ -790,7 +1056,21 @@ def summarize_case(case_name: str, case_records: Dict, dt: float) -> Dict[str, f
     energy_proxy = mean_or_nan(all_metrics["energy_proxy"])
     smoothness_score = 0.6 * error_to_score(action_delta_rms, 0.03, 0.30) + 0.4 * error_to_score(torque_delta_rms, 2.0, 40.0)
 
-    success_rate = percentage(sum(success_flags), len(success_flags)) if success_flags else 0.0
+    default_tracking = summarize_tracking_variant(case_name, case_records, POSE_VARIANT_DEFAULT)
+    random_rpy_tracking = summarize_tracking_variant(case_name, case_records, POSE_VARIANT_RANDOM_RPY)
+    has_ee_pose_tracking = default_tracking is not None
+    if has_ee_pose_tracking:
+        xyz_only_success_rate = default_tracking["xyz_only_success_rate_pct"]
+        ee_rpy_success_rate = default_tracking["ee_rpy_success_rate_pct"]
+        ee_xyz_rpy_success_rate = default_tracking["ee_xyz_rpy_success_rate_pct"]
+        success_rate = ee_xyz_rpy_success_rate
+    else:
+        xyz_only_success_rate = percentage(sum(success_flags), len(success_flags)) if success_flags else 0.0
+        ee_rpy_success_flags = case_records["segment_ee_rpy_success"]
+        ee_xyz_rpy_success_flags = case_records["segment_ee_xyz_rpy_success"]
+        ee_rpy_success_rate = percentage(sum(ee_rpy_success_flags), len(ee_rpy_success_flags)) if ee_rpy_success_flags else float("nan")
+        ee_xyz_rpy_success_rate = percentage(sum(ee_xyz_rpy_success_flags), len(ee_xyz_rpy_success_flags)) if ee_xyz_rpy_success_flags else float("nan")
+        success_rate = ee_xyz_rpy_success_rate if ee_xyz_rpy_success_flags else xyz_only_success_rate
     settling_time_s = mean_or_nan([t for t in settling_times if not math.isnan(t)])
 
     disturbance_band_accuracy = float("nan")
@@ -806,7 +1086,13 @@ def summarize_case(case_name: str, case_records: Dict, dt: float) -> Dict[str, f
     case_summary = {
         "case_name": case_name,
         "tracking_rmse_window_s": TRACKING_WINDOW_S,
+        "has_ee_pose_tracking": has_ee_pose_tracking,
         "success_rate_pct": success_rate,
+        "xyz_only_success_rate_pct": xyz_only_success_rate,
+        "ee_rpy_success_rate_pct": ee_rpy_success_rate,
+        "ee_xyz_rpy_success_rate_pct": ee_xyz_rpy_success_rate,
+        "ee_rpy_success_threshold_rad": EE_RPY_SUCCESS_THRESHOLD_RAD,
+        "ee_rpy_success_threshold_deg": math.degrees(EE_RPY_SUCCESS_THRESHOLD_RAD),
         "settling_time_s": settling_time_s,
         "nominal_ee_rmse_cm": nominal_ee_rmse_m * 100.0 if not math.isnan(nominal_ee_rmse_m) else float("nan"),
         "compensated_ee_rmse_cm": compensated_ee_rmse_m * 100.0 if not math.isnan(compensated_ee_rmse_m) else float("nan"),
@@ -835,11 +1121,19 @@ def summarize_case(case_name: str, case_records: Dict, dt: float) -> Dict[str, f
         "smoothness_score_pct": smoothness_score,
         "disturbance_band_accuracy_pct": disturbance_band_accuracy,
         "force_band_accuracy_pct": force_band_accuracy,
+        "default_tracking": default_tracking,
+        "random_rpy_tracking": random_rpy_tracking,
         "estimator_by_tag": summarize_estimator_tags(tags),
     }
 
     if case_name == "position_only":
-        case_summary["tracking_score_pct"] = error_to_score(nominal_ee_rmse_m, 0.03, 0.12)
+        xyz_tracking_score = error_to_score(nominal_ee_rmse_m, 0.03, 0.12)
+        rpy_tracking_score = error_to_score(ee_rpy_rmse_rad, EE_RPY_SCORE_GOOD_RAD, EE_RPY_SCORE_BAD_RAD)
+        case_summary["primary_ee_rmse_cm"] = case_summary["nominal_ee_rmse_cm"]
+        case_summary["primary_ee_rmse_label"] = "Nominal EE"
+        case_summary["xyz_only_tracking_score_pct"] = xyz_tracking_score
+        case_summary["ee_rpy_tracking_score_pct"] = rpy_tracking_score
+        case_summary["tracking_score_pct"] = min(xyz_tracking_score, rpy_tracking_score)
         case_summary["case_score_pct"] = (
             0.40 * case_summary["success_rate_pct"]
             + 0.30 * case_summary["tracking_score_pct"]
@@ -847,7 +1141,13 @@ def summarize_case(case_name: str, case_records: Dict, dt: float) -> Dict[str, f
             + 0.15 * case_summary["contact_cleanliness_score_pct"]
         )
     elif case_name == "hybrid_force_position":
-        case_summary["tracking_score_pct"] = error_to_score(compensated_ee_rmse_m, 0.03, 0.14)
+        xyz_tracking_score = error_to_score(compensated_ee_rmse_m, 0.03, 0.14)
+        rpy_tracking_score = error_to_score(ee_rpy_rmse_rad, EE_RPY_SCORE_GOOD_RAD, EE_RPY_SCORE_BAD_RAD)
+        case_summary["primary_ee_rmse_cm"] = case_summary["compensated_ee_rmse_cm"]
+        case_summary["primary_ee_rmse_label"] = "Compensated EE"
+        case_summary["xyz_only_tracking_score_pct"] = xyz_tracking_score
+        case_summary["ee_rpy_tracking_score_pct"] = rpy_tracking_score
+        case_summary["tracking_score_pct"] = min(xyz_tracking_score, rpy_tracking_score)
         band = case_summary["force_band_accuracy_pct"]
         band = 0.0 if math.isnan(band) else band
         case_summary["case_score_pct"] = (
@@ -857,6 +1157,8 @@ def summarize_case(case_name: str, case_records: Dict, dt: float) -> Dict[str, f
             + 0.15 * case_summary["survival_rate_pct"]
         )
     elif case_name == "arm_force_estimation":
+        case_summary["xyz_only_tracking_score_pct"] = float("nan")
+        case_summary["ee_rpy_tracking_score_pct"] = float("nan")
         force_diag = summarize_force_estimator_branch(tags["force_probe"], "ee")
         case_summary["force_estimator_branch"] = "ee"
         case_summary["force_estimation_nonzero_accuracy_pct"] = force_diag["nonzero_force_accuracy_pct"]
@@ -872,6 +1174,8 @@ def summarize_case(case_name: str, case_records: Dict, dt: float) -> Dict[str, f
             + 0.10 * case_summary["survival_rate_pct"]
         )
     elif case_name == "base_force_estimation":
+        case_summary["xyz_only_tracking_score_pct"] = float("nan")
+        case_summary["ee_rpy_tracking_score_pct"] = float("nan")
         force_diag = summarize_force_estimator_branch(tags["force_probe"], "base")
         case_summary["force_estimator_branch"] = "base"
         case_summary["force_estimation_nonzero_accuracy_pct"] = force_diag["nonzero_force_accuracy_pct"]
@@ -887,6 +1191,8 @@ def summarize_case(case_name: str, case_records: Dict, dt: float) -> Dict[str, f
             + 0.10 * case_summary["survival_rate_pct"]
         )
     elif case_name == "base_disturbance":
+        case_summary["xyz_only_tracking_score_pct"] = float("nan")
+        case_summary["ee_rpy_tracking_score_pct"] = float("nan")
         case_summary["tracking_score_pct"] = error_to_score(base_comp_vel_rmse, 0.04, 0.35)
         band = case_summary["disturbance_band_accuracy_pct"]
         band = 0.0 if math.isnan(band) else band
@@ -898,7 +1204,13 @@ def summarize_case(case_name: str, case_records: Dict, dt: float) -> Dict[str, f
             + 0.20 * case_summary["survival_rate_pct"]
         )
     elif case_name == "mixed_whole_body":
-        case_summary["tracking_score_pct"] = error_to_score(compensated_ee_rmse_m, 0.04, 0.16)
+        xyz_tracking_score = error_to_score(compensated_ee_rmse_m, 0.04, 0.16)
+        rpy_tracking_score = error_to_score(ee_rpy_rmse_rad, EE_RPY_SCORE_GOOD_RAD, EE_RPY_SCORE_BAD_RAD)
+        case_summary["primary_ee_rmse_cm"] = case_summary["compensated_ee_rmse_cm"]
+        case_summary["primary_ee_rmse_label"] = "Compensated EE"
+        case_summary["xyz_only_tracking_score_pct"] = xyz_tracking_score
+        case_summary["ee_rpy_tracking_score_pct"] = rpy_tracking_score
+        case_summary["tracking_score_pct"] = min(xyz_tracking_score, rpy_tracking_score)
         base_score = error_to_score(base_comp_vel_rmse, 0.05, 0.35)
         case_summary["case_score_pct"] = (
             0.25 * case_summary["tracking_score_pct"]
@@ -909,6 +1221,8 @@ def summarize_case(case_name: str, case_records: Dict, dt: float) -> Dict[str, f
             + 0.10 * case_summary["smoothness_score_pct"]
         )
     else:
+        case_summary["xyz_only_tracking_score_pct"] = float("nan")
+        case_summary["ee_rpy_tracking_score_pct"] = float("nan")
         case_summary["tracking_score_pct"] = 0.0
         case_summary["case_score_pct"] = 0.0
 
@@ -1078,6 +1392,11 @@ def run_scenario(env, policy, obs, scenario: Scenario, estimator_records, global
         "last_window_metrics": defaultdict(list),
         "last_window_tags": defaultdict(lambda: defaultdict(list)),
         "segment_success": [],
+        "segment_ee_rpy_success": [],
+        "segment_ee_xyz_rpy_success": [],
+        "pose_segment_success": defaultdict(list),
+        "pose_segment_ee_rpy_success": defaultdict(list),
+        "pose_segment_ee_xyz_rpy_success": defaultdict(list),
         "settling_times": [],
         "reset_flags": [],
         "foot_slip_total": 0.0,
@@ -1086,6 +1405,7 @@ def run_scenario(env, policy, obs, scenario: Scenario, estimator_records, global
         "active_step_count": 0.0,
     }
     segment_primary_errors = []
+    segment_rpy_errors = []
     segment_window_metric_rows = defaultdict(list)
     segment_window_tag_rows = defaultdict(lambda: defaultdict(list))
     alive_mask = torch.ones(num_envs, dtype=torch.bool, device=env.device)
@@ -1100,6 +1420,7 @@ def run_scenario(env, policy, obs, scenario: Scenario, estimator_records, global
             gt_obs_pred_tensor = env.obs_pred.detach().clone()
             actions = policy(obs, policy_info)
             obs, _, dones, _ = env.step(actions.detach())
+            apply_profile_ee_orientation(env, ph)
             latent_pred_tensor = torch.tensor(policy_info["latents"], device=env.device, dtype=torch.float)
             active_mask = alive_mask & (~dones.bool())
             any_reset_mask |= dones.bool()
@@ -1116,6 +1437,11 @@ def run_scenario(env, policy, obs, scenario: Scenario, estimator_records, global
                     row = np.full(num_envs, np.nan, dtype=np.float32)
                     row[active_cpu] = primary_values[active_cpu]
                     segment_primary_errors.append(row)
+                    if scenario.primary_metric in EE_TRACKING_PRIMARY_METRICS and "ee_rpy_error_norm" in metrics:
+                        rpy_values = metrics["ee_rpy_error_norm"].detach().cpu().numpy()
+                        rpy_row = np.full(num_envs, np.nan, dtype=np.float32)
+                        rpy_row[active_cpu] = rpy_values[active_cpu]
+                        segment_rpy_errors.append(rpy_row)
                     for metric_name in LAST_WINDOW_RMSE_METRICS:
                         if metric_name not in metrics:
                             continue
@@ -1142,6 +1468,7 @@ def run_scenario(env, policy, obs, scenario: Scenario, estimator_records, global
             break
 
     error_matrix = stack_or_empty(segment_primary_errors, num_envs)
+    rpy_error_matrix = stack_or_empty(segment_rpy_errors, num_envs)
     last_window_steps = max(1, int(round(TRACKING_WINDOW_S / dt)))
     for metric_name, rows in segment_window_metric_rows.items():
         metric_matrix = stack_or_empty(rows, num_envs)
@@ -1150,7 +1477,22 @@ def run_scenario(env, policy, obs, scenario: Scenario, estimator_records, global
         for metric_name, rows in tag_rows.items():
             metric_matrix = stack_or_empty(rows, num_envs)
             append_last_window_values(scenario_records["last_window_tags"][tag][metric_name], metric_matrix, last_window_steps)
-    scenario_records["segment_success"].extend(compute_segment_success(error_matrix, scenario.success_threshold, last_window_steps))
+    segment_success = compute_segment_success(error_matrix, scenario.success_threshold, last_window_steps)
+    segment_ee_rpy_success = compute_segment_success(rpy_error_matrix, EE_RPY_SUCCESS_THRESHOLD_RAD, last_window_steps)
+    segment_ee_xyz_rpy_success = compute_segment_joint_success(
+        error_matrix,
+        scenario.success_threshold,
+        rpy_error_matrix,
+        EE_RPY_SUCCESS_THRESHOLD_RAD,
+        last_window_steps,
+    )
+    scenario_records["segment_success"].extend(segment_success)
+    scenario_records["segment_ee_rpy_success"].extend(segment_ee_rpy_success)
+    scenario_records["segment_ee_xyz_rpy_success"].extend(segment_ee_xyz_rpy_success)
+    if scenario.primary_metric in EE_TRACKING_PRIMARY_METRICS:
+        scenario_records["pose_segment_success"][scenario.pose_variant].extend(segment_success)
+        scenario_records["pose_segment_ee_rpy_success"][scenario.pose_variant].extend(segment_ee_rpy_success)
+        scenario_records["pose_segment_ee_xyz_rpy_success"][scenario.pose_variant].extend(segment_ee_xyz_rpy_success)
     scenario_records["settling_times"].extend(compute_settling_times(error_matrix, dt, scenario.success_threshold))
     scenario_records["reset_flags"].extend(any_reset_mask.detach().cpu().numpy().astype(np.float32).tolist())
 
@@ -1171,6 +1513,14 @@ def merge_case_records(dst, src):
         for name, values in tag_dict.items():
             dst["last_window_tags"][tag][name].extend(values)
     dst["segment_success"].extend(src["segment_success"])
+    dst["segment_ee_rpy_success"].extend(src["segment_ee_rpy_success"])
+    dst["segment_ee_xyz_rpy_success"].extend(src["segment_ee_xyz_rpy_success"])
+    for pose_variant, values in src["pose_segment_success"].items():
+        dst["pose_segment_success"][pose_variant].extend(values)
+    for pose_variant, values in src["pose_segment_ee_rpy_success"].items():
+        dst["pose_segment_ee_rpy_success"][pose_variant].extend(values)
+    for pose_variant, values in src["pose_segment_ee_xyz_rpy_success"].items():
+        dst["pose_segment_ee_xyz_rpy_success"][pose_variant].extend(values)
     dst["settling_times"].extend(src["settling_times"])
     dst["reset_flags"].extend(src["reset_flags"])
     dst["foot_slip_total"] += src["foot_slip_total"]
@@ -1186,6 +1536,11 @@ def make_empty_case_records():
         "last_window_metrics": defaultdict(list),
         "last_window_tags": defaultdict(lambda: defaultdict(list)),
         "segment_success": [],
+        "segment_ee_rpy_success": [],
+        "segment_ee_xyz_rpy_success": [],
+        "pose_segment_success": defaultdict(list),
+        "pose_segment_ee_rpy_success": defaultdict(list),
+        "pose_segment_ee_xyz_rpy_success": defaultdict(list),
         "settling_times": [],
         "reset_flags": [],
         "foot_slip_total": 0.0,
@@ -1318,6 +1673,28 @@ def build_markdown_report(metadata, case_summaries, estimator_summary, runtime_q
             f"- Foot slip ratio: `{format_float(summary['foot_slip_ratio_pct'], 2)} %`",
             f"- Smoothness: `{format_float(summary['smoothness_score_pct'], 2)} %`",
         ])
+        if summary.get("has_ee_pose_tracking", False):
+            random_rpy_tracking = summary.get("random_rpy_tracking")
+            lines.extend([
+                f"- EE XYZ+RPY tracking: success `{format_float(summary['ee_xyz_rpy_success_rate_pct'], 2)} %`, "
+                f"score `{format_float(summary['tracking_score_pct'], 2)} %`, "
+                f"{summary['primary_ee_rmse_label']} RMSE `{format_float(summary['primary_ee_rmse_cm'], 2)} cm`, "
+                f"RPY RMSE `{format_float(summary['ee_rpy_rmse_deg'], 2)} deg`, "
+                f"RPY success threshold `{format_float(summary['ee_rpy_success_threshold_deg'], 2)} deg`",
+                f"- EE XYZ-only tracking: success `{format_float(summary['xyz_only_success_rate_pct'], 2)} %`, "
+                f"score `{format_float(summary['xyz_only_tracking_score_pct'], 2)} %`, "
+                f"{summary['primary_ee_rmse_label']} RMSE `{format_float(summary['primary_ee_rmse_cm'], 2)} cm`",
+            ])
+            if random_rpy_tracking is not None:
+                lines.extend([
+                    f"- EE random-RPY XYZ+RPY tracking: success `{format_float(random_rpy_tracking['ee_xyz_rpy_success_rate_pct'], 2)} %`, "
+                    f"score `{format_float(random_rpy_tracking['tracking_score_pct'], 2)} %`, "
+                    f"{random_rpy_tracking['primary_ee_rmse_label']} RMSE `{format_float(random_rpy_tracking['primary_ee_rmse_cm'], 2)} cm`, "
+                    f"RPY RMSE `{format_float(random_rpy_tracking['ee_rpy_rmse_deg'], 2)} deg`",
+                    f"- EE random-RPY XYZ-only tracking: success `{format_float(random_rpy_tracking['xyz_only_success_rate_pct'], 2)} %`, "
+                    f"score `{format_float(random_rpy_tracking['xyz_only_tracking_score_pct'], 2)} %`, "
+                    f"{random_rpy_tracking['primary_ee_rmse_label']} RMSE `{format_float(random_rpy_tracking['primary_ee_rmse_cm'], 2)} cm`",
+                ])
         if "force_estimator_branch" in summary:
             lines.extend([
                 f"- Force estimator branch: `{summary['force_estimator_branch']}`",
@@ -1389,6 +1766,32 @@ def print_console_summary(case_summaries, estimator_summary, runtime_quality, ov
                 f"MAE_all={format_float(summary['force_estimation_mae_all_n'], 2)} N | "
                 f"MAE_nonzero={format_float(summary['force_estimation_mae_nonzero_n'], 2)} N"
             )
+        elif summary.get("has_ee_pose_tracking", False):
+            random_rpy_tracking = summary.get("random_rpy_tracking")
+            print(
+                f"[{case_name}] XYZ+RPY success={format_float(summary['ee_xyz_rpy_success_rate_pct'], 2)} % | "
+                f"score={format_float(summary['tracking_score_pct'], 2)} % | "
+                f"case_score={format_float(summary['case_score_pct'], 2)} % | "
+                f"XYZ_RMSE={format_float(summary['primary_ee_rmse_cm'], 2)} cm | "
+                f"RPY_RMSE={format_float(summary['ee_rpy_rmse_deg'], 2)} deg"
+            )
+            print(
+                f"[{case_name}] XYZ-only success={format_float(summary['xyz_only_success_rate_pct'], 2)} % | "
+                f"score={format_float(summary['xyz_only_tracking_score_pct'], 2)} % | "
+                f"XYZ_RMSE={format_float(summary['primary_ee_rmse_cm'], 2)} cm"
+            )
+            if random_rpy_tracking is not None:
+                print(
+                    f"[{case_name}] random-RPY XYZ+RPY success={format_float(random_rpy_tracking['ee_xyz_rpy_success_rate_pct'], 2)} % | "
+                    f"score={format_float(random_rpy_tracking['tracking_score_pct'], 2)} % | "
+                    f"XYZ_RMSE={format_float(random_rpy_tracking['primary_ee_rmse_cm'], 2)} cm | "
+                    f"RPY_RMSE={format_float(random_rpy_tracking['ee_rpy_rmse_deg'], 2)} deg"
+                )
+                print(
+                    f"[{case_name}] random-RPY XYZ-only success={format_float(random_rpy_tracking['xyz_only_success_rate_pct'], 2)} % | "
+                    f"score={format_float(random_rpy_tracking['xyz_only_tracking_score_pct'], 2)} % | "
+                    f"XYZ_RMSE={format_float(random_rpy_tracking['primary_ee_rmse_cm'], 2)} cm"
+                )
         else:
             print(
                 f"[{case_name}] success={format_float(summary['success_rate_pct'], 2)} % | "
@@ -1468,7 +1871,12 @@ def run_evaluation(args):
     env._update_key_command_ee_goal()
 
     home_local = env.key_command_ee_local_cart[0].detach().cpu().numpy().astype(np.float32)
-    scenario_bank = build_scenarios(home_local)
+    ee_orn_ranges = {
+        "delta_orn_r": [float(env.goal_ee_ranges["delta_orn_r"][0]), float(env.goal_ee_ranges["delta_orn_r"][1])],
+        "delta_orn_p": [float(env.goal_ee_ranges["delta_orn_p"][0]), float(env.goal_ee_ranges["delta_orn_p"][1])],
+        "delta_orn_y": [float(env.goal_ee_ranges["delta_orn_y"][0]), float(env.goal_ee_ranges["delta_orn_y"][1])],
+    }
+    scenario_bank = build_scenarios(home_local, args.task, env_cfg.seed, ee_orn_ranges)
 
     selected_cases = list(scenario_bank.keys()) if args.eval_case == "all" else [args.eval_case]
     invalid_cases = [case for case in selected_cases if case not in scenario_bank]

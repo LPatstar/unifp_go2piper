@@ -1,5 +1,6 @@
 import os
 import sys
+import math
 
 unitree_rl_gym_path = os.path.abspath(__file__ + "../../../../")
 sys.path.append(unitree_rl_gym_path)
@@ -23,11 +24,15 @@ def print_key_help(draw_mode=False, torque_recording=False):
     print("  Numpad 8/2 : EE target x +/-")
     print("  Numpad 4/6 : EE target y +/-")
     print("  Numpad 9/3 : EE target z +/-")
-    print("  Numpad 0   : set EE target to current EE pose")
+    print("  U/H : EE target roll +/-")
+    print("  Y/G : EE target pitch +/-")
+    print("  T/B : EE target yaw +/-")
+    print("  Numpad 0   : set EE target XYZ to current EE position")
     print("  J/K : EE force command x -/+")
     print("  O/I : base force command x -/+")
     print("  R   : reset base motion commands to zero")
     print("  Numpad 5   : reset EE target to home")
+    print("  M   : reset EE target RPY to default")
     print("  N   : reset force commands to zero")
     if draw_mode:
         print("  X : save draw plots and exit")
@@ -42,6 +47,8 @@ def print_key_help(draw_mode=False, torque_recording=False):
 
 def format_status(env):
     ee_target_local = env.key_command_ee_local_cart[0].detach().cpu().numpy()
+    ee_target_orn_delta = env.key_command_ee_orn_delta_rpy[0].detach().cpu().numpy()
+    ee_target_orn_delta_deg = [math.degrees(value) for value in ee_target_orn_delta]
     return (
         f"base_cmd: vx={env.commands[0, 0].item():+.2f}, "
         f"vy={env.commands[0, 1].item():+.2f}, "
@@ -49,6 +56,9 @@ def format_status(env):
         f"ee_target_local: x={ee_target_local[0]:+.3f}, "
         f"y={ee_target_local[1]:+.3f}, "
         f"z={ee_target_local[2]:+.3f} | "
+        f"ee_target_delta_rpy: r={ee_target_orn_delta_deg[0]:+.1f}deg, "
+        f"p={ee_target_orn_delta_deg[1]:+.1f}deg, "
+        f"y={ee_target_orn_delta_deg[2]:+.1f}deg | "
         f"ee_force_x={env.current_Fxyz_gripper_cmd[0, 0].item():+.1f}N | "
         f"base_force_x={env.current_Fxyz_base_cmd[0, 0].item():+.1f}N"
     )

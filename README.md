@@ -147,13 +147,18 @@ This mode keeps policy inference running, but replaces the usual randomized comm
   - Numpad `8/2`: move EE target along local `x +/-`
   - Numpad `4/6`: move EE target along local `y +/-`
   - Numpad `9/3`: move EE target along local `z +/-`
-  - Numpad `0`: set EE target to the current end-effector pose
+  - Numpad `0`: set EE target XYZ to the current end-effector position
+- End-effector orientation target commands:
+  - `U/H`: increase/decrease EE target roll delta
+  - `Y/G`: increase/decrease EE target pitch delta
+  - `T/B`: increase/decrease EE target yaw delta
 - Force command adjustments:
   - `J/K`: decrease/increase end-effector force command on `x`
   - `O/I`: decrease/increase base force command on `x`
 - Reset shortcuts:
   - `R`: reset base motion commands to zero
   - Numpad `5`: reset EE target to the home position
+  - `M`: reset EE target RPY to the default orientation
   - `N`: reset force commands to zero
 - Exit shortcut:
   - `X`: exit keyplay

@@ -106,7 +106,9 @@ python eval_posforce.py --load_run=<run_name> --headless
 特点：
 
 - 不给 EE force command，只注入 EE external force
-- 分别测试 `x`、`z` 和 `xy` 方向外力
+- `b2z1_pos_force` 使用更接近 UniFP 论文的设置：可复现随机选择 5 个末端位置，`x` 轴外力覆盖 `-60N` 到 `60N`，`y` / `z` 轴外力限制在 `-40N` 到 `40N`
+- `force_probe` 不使用 `0N`，因为脚本已经有单独的 `zero_probe` 段用于观察零外力行为
+- 其他适配任务仍使用较小的固定 `x`、`z` 和 `xy` probe，避免把 B2+Z1 的硬件力范围直接套到 Go2+Piper
 - 只把 `force_probe` 段用于核心力估计评分
 
 核心输出：
@@ -206,6 +208,7 @@ python eval_posforce.py --load_run=<run_name> --headless
 - 某个 reach 场景结束前的最后一个时间窗内
 - 当前 6D 评测下，主 success 口径是 `XYZ+RPY`：位置误差和姿态误差都低于阈值，才记为成功
 - 报告中同时保留 `XYZ-only` 旧口径，方便区分是位置没跟上，还是姿态没跟上
+- 对有 EE tracking 的 case，脚本还会额外运行一组 `random-RPY` 姿态目标场景，专门检查非默认末端姿态下的 6D tracking
 
 默认主要阈值：
 
@@ -234,7 +237,8 @@ python eval_posforce.py --load_run=<run_name> --headless
 - 比 success rate 更平滑
 - 更适合比较“两个模型都能到，但谁更准”
 - 当前脚本中，tracking score 使用的 RMSE 与 success 一样，只看每个 scripted scenario 结束前最后 `0.25 s` 的 tracking 窗口，不把刚切目标后的过渡误差混进去
-- 报告中同时显示 `EE XYZ+RPY tracking` 和 `EE XYZ-only tracking` 两行，前者用于 6D 目标，后者等价于旧版只看 XYZ 的口径
+- 报告中默认姿态仍显示原有 `EE XYZ+RPY tracking` 和 `EE XYZ-only tracking` 两行，前者用于 6D 目标，后者等价于旧版只看 XYZ 的口径
+- 对同一个 tracking case，还会追加 `EE random-RPY XYZ+RPY tracking` 和 `EE random-RPY XYZ-only tracking` 两行，用于区分默认姿态和变化姿态的表现
 
 ### 5.3 EE RMSE
 
@@ -275,8 +279,9 @@ python eval_posforce.py --load_run=<run_name> --headless
 统计窗口：
 
 - 与 EE XYZ RMSE 一样，只统计每个 scripted scenario 的最后 `0.25 s` tracking 窗口
-- 这个指标只是已有 tracking case 的附加读数，不是一个新的 task
+- 这个指标只是已有 tracking case 的附加读数，不是一个新的顶层 task
 - 对有 EE tracking 的 case，主 success / tracking score / case score 会使用 `XYZ+RPY` 口径；报告中另有 `XYZ-only` 旧口径作为诊断对照
+- `random-RPY` 场景会使用同一个 XYZ 目标逻辑，但额外给 roll / pitch / yaw 随机 delta；默认 case score 暂不被 random-RPY 诊断行覆盖，方便和旧默认姿态结果对比
 
 解读：
 
