@@ -1,6 +1,6 @@
-# Go2+Piper 自动评测说明
+# Position-Force 自动评测说明
 
-本文档说明 [eval_go2piperposforce.py](legged_gym/scripts/eval_go2piperposforce.py) 的设计目标、评测场景、指标含义和结果解读方式，供使用者在查看自动评测报告时参考。
+本文档说明 [eval_posforce.py](legged_gym/scripts/eval_posforce.py) 的设计目标、评测场景、指标含义和结果解读方式，供使用者在查看自动评测报告时参考。
 
 ## 1. 评测目标
 
@@ -16,7 +16,7 @@
 
 - 不同 checkpoint 之间的横向对比
 - 调参前后的快速回归测试
-- `go2_piper` fork 的阶段性质量检查
+- position-force 任务的阶段性质量检查
 
 它不直接替代真实任务成功率评测，例如开门、擦黑板、抽屉等接触任务。
 
@@ -24,8 +24,10 @@
 
 ```bash
 cd legged_gym/scripts
-python eval_go2piperposforce.py --task=go2_piper_pos_force --load_run=<run_name> --headless
+python eval_posforce.py --load_run=<run_name> --headless
 ```
+
+当前脚本默认评测 `b2z1_pos_force`。如果需要回到 Go2+Piper，需要显式加 `--task=go2_piper_pos_force`。
 
 常用参数：
 
@@ -251,7 +253,29 @@ python eval_go2piperposforce.py --task=go2_piper_pos_force --load_run=<run_name>
 - `Position-Only` 主要看 nominal
 - `Hybrid Force-Position` 主要看 compensated
 
-### 5.4 Settling Time
+### 5.4 EE RPY RMSE
+
+单位：
+
+- `deg`，同时在 `summary.json` 中保留 `rad` 字段
+
+含义：
+
+- 把当前末端姿态和目标末端姿态都按 RPY 表示
+- 对 roll / pitch / yaw 分别计算包裹到 `[-pi, pi]` 的角度误差
+- 报告里单独显示一行 `EE RPY RMSE`，不和 XYZ 位置 RMSE 混在一起
+
+统计窗口：
+
+- 与 EE XYZ RMSE 一样，只统计每个 scripted scenario 的最后 `0.25 s` tracking 窗口
+- 这个指标只是已有 tracking case 的附加读数，不是一个新的 task，也不改变现有 case score 权重
+
+解读：
+
+- XYZ RMSE 低但 RPY RMSE 高，说明末端到点了但姿态没有跟上
+- RPY RMSE 低但 XYZ RMSE 高，说明姿态对齐了但位置还没到位
+
+### 5.5 Settling Time
 
 单位：
 

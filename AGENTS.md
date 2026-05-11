@@ -4,7 +4,8 @@
 
 This repository is a Go2+Piper-oriented fork of UniFP for whole-body position-force control in Isaac Gym.
 
-Primary task:
+Primary position-force tasks:
+- `b2z1_pos_force`
 - `go2_piper_pos_force`
 
 The repo is not a clean greenfield project. It keeps a large amount of upstream UniFP / B2+Z1 structure, and the Go2+Piper task is layered on top of that shared implementation.
@@ -23,37 +24,49 @@ This repo is not meaningfully testable in a generic sandbox without a working Is
 Train:
 ```bash
 cd legged_gym/scripts
-python train_go2piperposforce.py --task=go2_piper_pos_force --headless
+python train_b2z1posforce.py --headless
+```
+
+Go2+Piper train:
+```bash
+cd legged_gym/scripts
+python train_go2piperposforce.py --headless
 ```
 
 Play:
 ```bash
 cd legged_gym/scripts
-python play_go2piperposforce.py --task=go2_piper_pos_force --load_run=<run_name>
+python play_b2z1posforce.py --load_run=<run_name>
+```
+
+Go2+Piper play:
+```bash
+cd legged_gym/scripts
+python play_go2piperposforce.py --load_run=<run_name>
 ```
 
 Play with joint tracking draw export:
 ```bash
 cd legged_gym/scripts
-python play_go2piperposforce.py --task=go2_piper_pos_force --load_run=<run_name> --draw
+python play_go2piperposforce.py --load_run=<run_name> --draw
 ```
 
 Keyboard teleop / manual inspection:
 ```bash
 cd legged_gym/scripts
-python keyplay_go2piperposforce.py --task=go2_piper_pos_force --load_run=<run_name>
+python keyplay_posforce.py --load_run=<run_name>
 ```
 
 Keyboard teleop with draw export:
 ```bash
 cd legged_gym/scripts
-python keyplay_go2piperposforce.py --task=go2_piper_pos_force --load_run=<run_name> --draw
+python keyplay_posforce.py --load_run=<run_name> --draw
 ```
 
 Automated evaluation:
 ```bash
 cd legged_gym/scripts
-python eval_go2piperposforce.py --task=go2_piper_pos_force --load_run=<run_name> --headless
+python eval_posforce.py --load_run=<run_name> --headless
 ```
 
 ## Code Map
@@ -98,18 +111,19 @@ Task registration:
 
 ## Script Behavior Notes
 
-- `train_go2piperposforce.py` delegates to the shared B2/Z1 training implementation and forces `args.task = "go2_piper_pos_force"` when not provided.
-- `play_go2piperposforce.py` delegates to the shared play implementation and enables force visualization / play-side command-force behavior through module flags.
+- `train_b2z1posforce.py` and `play_b2z1posforce.py` are the B2+Z1 entry points and default to `b2z1_pos_force`.
+- `train_go2piperposforce.py` and `play_go2piperposforce.py` are the Go2+Piper entry points and default to `go2_piper_pos_force`. The Go2 play wrapper enables force visualization / play-side command-force behavior through module flags.
+- `eval_posforce.py` and `keyplay_posforce.py` are generic position-force entry points and default to `b2z1_pos_force`; pass `--task=go2_piper_pos_force` when using them on Go2+Piper runs.
 - `play_go2piperposforce.py --draw` runs a short rollout, saves joint command-vs-actual plots for one front-left leg and the task-relevant arm joints, then exits. The shared play script auto-resolves the correct arm joint names for Go2+Piper and B2+Z1.
-- `keyplay_go2piperposforce.py` creates a single-env teleop setup, disables most randomization, and relies on viewer keyboard events for command updates. In `--draw` mode it records joint command-vs-actual traces and uses `X` to save plots and exit.
-- `eval_go2piperposforce.py` is the main reproducible checkpoint benchmark. Prefer it over ad hoc `play` sessions when comparing runs.
-- `play_go2piperposforce.py`, `keyplay_go2piperposforce.py`, and `eval_go2piperposforce.py` all use checkpoint-resume loading. If `--load_run` and `--checkpoint` are omitted, the shared loader resolves to the latest run directory and then the latest saved `model_*.pt` checkpoint inside it.
+- `keyplay_posforce.py` creates a single-env teleop setup, disables most randomization, and relies on viewer keyboard events for command updates. In `--draw` mode it records joint command-vs-actual traces and uses `X` to save plots and exit.
+- `eval_posforce.py` is the main reproducible checkpoint benchmark. Prefer it over ad hoc `play` sessions when comparing runs.
+- `play_b2z1posforce.py`, `play_go2piperposforce.py`, `keyplay_posforce.py`, and `eval_posforce.py` all use checkpoint-resume loading. If `--load_run` and `--checkpoint` are omitted, the shared loader resolves to the latest run directory and then the latest saved `model_*.pt` checkpoint inside it.
 
 ## Play Draw Notes
 
 - `play --draw` is the standard joint-level diagnostic path for tuning analysis.
 - Default command:
-  - `python play_go2piperposforce.py --task=go2_piper_pos_force --load_run=<run_name> --draw`
+  - `python play_go2piperposforce.py --load_run=<run_name> --draw`
 - Useful optional flag:
   - `--draw_steps <N>` to control how many play steps are recorded before the script exits
 - Output directory:
@@ -126,7 +140,7 @@ Task registration:
 
 - `keyplay` intentionally disables random command resampling and random force events.
 - Keyplay controls are split between:
-  - `legged_gym/scripts/keyplay_go2piperposforce.py`
+  - `legged_gym/scripts/keyplay_posforce.py`
   - viewer-event handling inside `legged_gym/envs/b2/legged_robot_b2z1_pos_force.py`
 - Numeric viewer hotkeys are disabled in key-command mode to avoid collisions with numpad EE controls.
 - In both ordinary keyplay and `keyplay --draw`, `V` toggles viewer sync. `X` is the dedicated exit key, and in `keyplay --draw` it saves plots before exiting.
@@ -148,7 +162,7 @@ Task registration:
   - the shared B2 environment implementation
   - the script layer
 - If changing keyboard control, force injection, viewer drawing, or command interpretation, inspect the shared B2 environment file before assuming the Go2 wrapper contains the logic.
-- If changing evaluation metrics or report structure, keep `README.md` and `GO2_PIPER_EVAL_METRICS.md` aligned.
+- If changing evaluation metrics or report structure, keep `README.md` and `EVAL_METRICS.md` aligned.
 - Prefer targeted edits. This fork inherits duplicated concepts and upstream naming that are easy to break with broad refactors.
 
 ## Local Artifacts And Ignore Guidance
@@ -200,7 +214,7 @@ Before any diagnosis or modification, all participating agents should first read
 - `AGENTS.md`
 - `README.md`
 - `GO2_PIPER_TUNING_REQUIREMENTS.md`
-- `GO2_PIPER_EVAL_METRICS.md`
+- `EVAL_METRICS.md`
 - `GO2_PIPER_CONFIG_REVIEW.md`
 - the latest relevant root-level analysis md files
 - the latest relevant files under `tuning_records/`

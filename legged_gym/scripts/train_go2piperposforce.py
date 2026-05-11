@@ -10,7 +10,7 @@ from legged_gym.utils import get_args
 
 if __name__ == "__main__":
     args = get_args()
-    if not getattr(args, "task", None):
+    if "--task" not in sys.argv:
         args.task = "go2_piper_pos_force"
     args.headless = True
     train(args)

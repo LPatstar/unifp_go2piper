@@ -36,7 +36,7 @@ Do not assume the system/default Python has the required Isaac Gym / PyTorch / N
 
 Before tuning, use these files for context:
 
-- `GO2_PIPER_EVAL_METRICS.md`
+- `EVAL_METRICS.md`
   - Use this to interpret `eval` outputs and understand what each benchmark score means.
 - `GO2_PIPER_CONFIG_REVIEW.md`
   - Use this to understand inherited config structure and which areas are still likely to need review.
@@ -133,7 +133,7 @@ Important eval execution rule:
    - If not, run one `play` with `--draw` for that sample first.
    - Standard command:
      - `cd legged_gym/scripts`
-     - `python play_go2piperposforce.py --task=go2_piper_pos_force --load_run=<run_name> --draw`
+     - `python play_go2piperposforce.py --load_run=<run_name> --draw`
    - Use `--draw_steps <N>` only when the default recording window is clearly not enough.
    - The plots are saved under `play_draws/`.
    - In normal tuning workflow, directly inspect the saved PNG plots themselves.

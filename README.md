@@ -84,19 +84,33 @@ The original UniFP project, paper, and website are linked above for method backg
 
 ### Policy Training
 
-#### Go2+Piper Position-Force Control Training
+#### Position-Force Control Training
 ```bash
 cd legged_gym/scripts
-python train_go2piperposforce.py --task=go2_piper_pos_force --headless
+python train_b2z1posforce.py --headless
 ```
+
+For Go2+Piper-specific training, use:
+
+```bash
+python train_go2piperposforce.py --headless
+```
+
+Default task behavior:
+
+- `train_b2z1posforce.py` / `play_b2z1posforce.py`: default to `b2z1_pos_force`
+- `train_go2piperposforce.py` / `play_go2piperposforce.py`: default to `go2_piper_pos_force`
+- `eval_posforce.py` / `keyplay_posforce.py`: generic scripts, default to `b2z1_pos_force`; add `--task=go2_piper_pos_force` when inspecting Go2+Piper runs
 
 ### Policy Evaluation and Testing
 
 #### Run Trained Policies
 ```bash
-# Go2+Piper position-force control testing
-python play_go2piperposforce.py --task=go2_piper_pos_force --load_run=<run_name>
+# Position-force control testing
+python play_b2z1posforce.py --load_run=<run_name>
 ```
+
+For Go2+Piper-specific play, use `python play_go2piperposforce.py --load_run=<run_name>`.
 
 Useful options:
 
@@ -108,14 +122,14 @@ Useful options:
 When `--draw` is enabled, the saved figures are written under `play_draws/` in the project root.
 
 #### Keyboard-Controlled Keyplay
-Use the keyplay script to manually command the Go2+Piper policy from the viewer instead of relying on randomized commands.
+Use the generic keyplay script to manually command a position-force policy from the viewer instead of relying on randomized commands.
 
 ```bash
-# Go2+Piper keyboard-controlled evaluation
-python keyplay_go2piperposforce.py --task=go2_piper_pos_force --load_run=<run_name>
+# Keyboard-controlled evaluation
+python keyplay_posforce.py --load_run=<run_name>
 
-# Keyplay with draw export; press V in the viewer to save plots and exit
-python keyplay_go2piperposforce.py --task=go2_piper_pos_force --load_run=<run_name> --draw
+# Keyplay with draw export; press X in the viewer to save plots and exit
+python keyplay_posforce.py --load_run=<run_name> --draw
 ```
 
 This mode keeps policy inference running, but replaces the usual randomized command stream with viewer keyboard input:
@@ -155,11 +169,11 @@ Notes:
 - Keyplay is intended for debugging, qualitative policy inspection, and fast command-side testing.
 
 #### Automated Evaluation Benchmark
-Use the automated evaluation script to run a reproducible benchmark suite for the current Go2+Piper checkpoint. It evaluates position tracking, hybrid force-position behavior, dedicated arm/base force estimation, base disturbance compensation, estimator quality, and whole-body robustness, then exports a machine-readable JSON report plus a Markdown summary.
+Use the automated evaluation script to run a reproducible benchmark suite for the current checkpoint. It evaluates position tracking, end-effector RPY tracking, hybrid force-position behavior, dedicated arm/base force estimation, base disturbance compensation, estimator quality, and whole-body robustness, then exports a machine-readable JSON report plus a Markdown summary.
 
 ```bash
-# Go2+Piper automated evaluation
-python eval_go2piperposforce.py --task=go2_piper_pos_force --load_run=<run_name> --headless
+# Automated evaluation
+python eval_posforce.py --load_run=<run_name> --headless
 ```
 
 Useful options:
@@ -176,13 +190,13 @@ Useful options:
 Outputs:
 
 - `summary.json`
-  Structured metrics for each evaluation case, estimator quality, runtime quality metrics, the final overall score, and the resolved model run/checkpoint that was actually evaluated.
+  Structured metrics for each evaluation case, including separate EE XYZ and RPY tracking fields, estimator quality, runtime quality metrics, the final overall score, and the resolved model run/checkpoint that was actually evaluated.
 - `summary.md`
   Human-readable version of the same evaluation result. The exported report folder name also includes the resolved run name and checkpoint so each eval can be matched back to a tuning note.
 
 If `--no_report` is set, the script still runs the full benchmark and prints the console summary, but it skips creating the output directory and does not write any report files.
 
-For a detailed explanation of the benchmark design and every metric, see [GO2_PIPER_EVAL_METRICS.md](GO2_PIPER_EVAL_METRICS.md).
+For a detailed explanation of the benchmark design and every metric, see [EVAL_METRICS.md](EVAL_METRICS.md).
 
 #### WandB Data Export
 Use the root-level WandB export helper to pull training curves and metadata into a local folder for plotting or offline comparison.
@@ -263,13 +277,19 @@ Notes:
 
 ### Core Components
 
-- **Environment Configuration** (`legged_gym/envs/go2/go2_piper_pos_force_config.py`)
+- **Shared B2+Z1 Environment Configuration** (`legged_gym/envs/b2/b2z1_pos_force_config.py`)
+  - Base position-force task configuration
+  - Reward function parameters
+  - Observation space definition
+  - Action space definition
+
+- **Go2+Piper Configuration Override** (`legged_gym/envs/go2/go2_piper_pos_force_config.py`)
   - Robot initial state configuration
   - Reward function parameters
   - Observation space definition
   - Action space definition
 
-- **Environment Implementation** (`legged_gym/envs/go2/legged_robot_go2_piper_pos_force.py`)
+- **Shared Environment Implementation** (`legged_gym/envs/b2/legged_robot_b2z1_pos_force.py`)
   - Simulation environment logic
   - Reward calculation
   - Observation space construction

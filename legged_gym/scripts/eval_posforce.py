@@ -15,7 +15,7 @@ sys.path.append(unitree_rl_gym_path)
 
 import isaacgym  # noqa: F401
 from isaacgym import gymutil
-from isaacgym.torch_utils import quat_apply
+from isaacgym.torch_utils import get_euler_xyz, quat_apply
 import torch
 
 from legged_gym import LEGGED_GYM_ROOT_DIR
@@ -35,6 +35,10 @@ TRACKING_WINDOW_S = 0.25
 LAST_WINDOW_RMSE_METRICS = (
     "nominal_ee_error",
     "compensated_ee_error",
+    "ee_rpy_error_norm",
+    "ee_roll_error",
+    "ee_pitch_error",
+    "ee_yaw_error",
     "base_nominal_vel_error",
     "base_comp_vel_error",
     "yaw_rate_error",
@@ -67,7 +71,7 @@ class Scenario:
 
 def get_eval_args():
     custom_parameters = [
-        {"name": "--task", "type": str, "default": "go2_piper_pos_force", "help": "Task name."},
+        {"name": "--task", "type": str, "default": "b2z1_pos_force", "help": "Task name."},
         {"name": "--resume", "action": "store_true", "default": False, "help": "Resume training from a checkpoint"},
         {"name": "--experiment_name", "type": str, "help": "Experiment name override."},
         {"name": "--run_name", "type": str, "help": "Run name override."},
@@ -91,7 +95,7 @@ def get_eval_args():
         {"name": "--output_dir", "type": str, "default": "eval_reports", "help": "Directory for eval outputs."},
         {"name": "--no_report", "action": "store_true", "default": False, "help": "Run evaluation without exporting summary files."},
     ]
-    args = gymutil.parse_arguments(description="Go2+Piper evaluation", custom_parameters=custom_parameters)
+    args = gymutil.parse_arguments(description="Position-force evaluation", custom_parameters=custom_parameters)
     args.sim_device_id = args.compute_device_id
     args.sim_device = args.sim_device_type
     if args.sim_device == "cuda":
@@ -557,6 +561,16 @@ def refresh_policy_observation(env, obs):
 def compute_step_metrics(env, latent_pred_tensor: torch.Tensor, gt_obs_pred_tensor: torch.Tensor) -> Dict[str, torch.Tensor]:
     nominal_ee_error = torch.norm(env.ee_pos - env.curr_ee_goal_cart_world, dim=1)
 
+    ee_roll, ee_pitch, ee_yaw = get_euler_xyz(env.ee_orn)
+    ee_rpy = torch.stack([ee_roll, ee_pitch, ee_yaw], dim=1)
+    target_ee_rpy = getattr(env, "curr_ee_goal_orn_rpy", None)
+    if target_ee_rpy is None:
+        target_roll, target_pitch, target_yaw = get_euler_xyz(env.ee_goal_orn_quat)
+        target_ee_rpy = torch.stack([target_roll, target_pitch, target_yaw], dim=1)
+    ee_rpy_error = torch.atan2(torch.sin(ee_rpy - target_ee_rpy), torch.cos(ee_rpy - target_ee_rpy))
+    ee_rpy_abs_error = torch.abs(ee_rpy_error)
+    ee_rpy_error_norm = torch.norm(ee_rpy_abs_error, dim=1)
+
     gripper_cmd_global = quat_apply(env.base_yaw_quat, env.current_Fxyz_gripper_cmd)
     compensated_ee_target = env.curr_ee_goal_cart_world + (env.forces[:, env.gripper_idx, :3] + gripper_cmd_global) / env.gripper_force_kps
     compensated_ee_error = torch.norm(env.ee_pos - compensated_ee_target, dim=1)
@@ -614,6 +628,10 @@ def compute_step_metrics(env, latent_pred_tensor: torch.Tensor, gt_obs_pred_tens
     return {
         "nominal_ee_error": nominal_ee_error,
         "compensated_ee_error": compensated_ee_error,
+        "ee_rpy_error_norm": ee_rpy_error_norm,
+        "ee_roll_error": ee_rpy_abs_error[:, 0],
+        "ee_pitch_error": ee_rpy_abs_error[:, 1],
+        "ee_yaw_error": ee_rpy_abs_error[:, 2],
         "base_nominal_vel_error": base_nominal_vel_error,
         "base_comp_vel_error": base_comp_vel_error,
         "yaw_rate_error": yaw_rate_error,
@@ -737,6 +755,10 @@ def summarize_case(case_name: str, case_records: Dict, dt: float) -> Dict[str, f
 
     nominal_ee_rmse_m = rms_or_nan(rmse_values_for_case(case_name, case_records, "nominal_ee_error"))
     compensated_ee_rmse_m = rms_or_nan(rmse_values_for_case(case_name, case_records, "compensated_ee_error"))
+    ee_rpy_rmse_rad = rms_or_nan(rmse_values_for_case(case_name, case_records, "ee_rpy_error_norm"))
+    ee_roll_rmse_rad = rms_or_nan(rmse_values_for_case(case_name, case_records, "ee_roll_error"))
+    ee_pitch_rmse_rad = rms_or_nan(rmse_values_for_case(case_name, case_records, "ee_pitch_error"))
+    ee_yaw_rmse_rad = rms_or_nan(rmse_values_for_case(case_name, case_records, "ee_yaw_error"))
     base_nominal_vel_rmse = rms_or_nan(rmse_values_for_case(case_name, case_records, "base_nominal_vel_error"))
     base_comp_vel_rmse = rms_or_nan(rmse_values_for_case(case_name, case_records, "base_comp_vel_error"))
     yaw_rate_rmse = rms_or_nan(rmse_values_for_case(case_name, case_records, "yaw_rate_error"))
@@ -788,6 +810,14 @@ def summarize_case(case_name: str, case_records: Dict, dt: float) -> Dict[str, f
         "settling_time_s": settling_time_s,
         "nominal_ee_rmse_cm": nominal_ee_rmse_m * 100.0 if not math.isnan(nominal_ee_rmse_m) else float("nan"),
         "compensated_ee_rmse_cm": compensated_ee_rmse_m * 100.0 if not math.isnan(compensated_ee_rmse_m) else float("nan"),
+        "ee_rpy_rmse_rad": ee_rpy_rmse_rad,
+        "ee_roll_rmse_rad": ee_roll_rmse_rad,
+        "ee_pitch_rmse_rad": ee_pitch_rmse_rad,
+        "ee_yaw_rmse_rad": ee_yaw_rmse_rad,
+        "ee_rpy_rmse_deg": math.degrees(ee_rpy_rmse_rad) if not math.isnan(ee_rpy_rmse_rad) else float("nan"),
+        "ee_roll_rmse_deg": math.degrees(ee_roll_rmse_rad) if not math.isnan(ee_roll_rmse_rad) else float("nan"),
+        "ee_pitch_rmse_deg": math.degrees(ee_pitch_rmse_rad) if not math.isnan(ee_pitch_rmse_rad) else float("nan"),
+        "ee_yaw_rmse_deg": math.degrees(ee_yaw_rmse_rad) if not math.isnan(ee_yaw_rmse_rad) else float("nan"),
         "base_nominal_vel_rmse_mps": base_nominal_vel_rmse,
         "base_comp_vel_rmse_mps": base_comp_vel_rmse,
         "yaw_rate_rmse_radps": yaw_rate_rmse,
@@ -1232,7 +1262,7 @@ def format_force_diag(diag: Dict[str, float]) -> str:
 
 def build_markdown_report(metadata, case_summaries, estimator_summary, runtime_quality, overall_summary):
     lines = [
-        "# Go2+Piper Automated Evaluation Report",
+        "# Position-Force Automated Evaluation Report",
         "",
         "## Metadata",
         f"- Task: `{metadata['task']}`",
@@ -1276,6 +1306,10 @@ def build_markdown_report(metadata, case_summaries, estimator_summary, runtime_q
             f"- Settling time: `{format_float(summary['settling_time_s'], 3)} s`",
             f"- Nominal EE RMSE: `{format_float(summary['nominal_ee_rmse_cm'], 2)} cm`",
             f"- Compensated EE RMSE: `{format_float(summary['compensated_ee_rmse_cm'], 2)} cm`",
+            f"- EE RPY RMSE: `{format_float(summary['ee_rpy_rmse_deg'], 2)} deg` "
+            f"(roll `{format_float(summary['ee_roll_rmse_deg'], 2)}`, "
+            f"pitch `{format_float(summary['ee_pitch_rmse_deg'], 2)}`, "
+            f"yaw `{format_float(summary['ee_yaw_rmse_deg'], 2)}`)",
             f"- Base nominal velocity RMSE: `{format_float(summary['base_nominal_vel_rmse_mps'], 3)} m/s`",
             f"- Base compensated velocity RMSE: `{format_float(summary['base_comp_vel_rmse_mps'], 3)} m/s`",
             f"- Yaw rate RMSE: `{format_float(summary['yaw_rate_rmse_radps'], 3)} rad/s`",
@@ -1360,6 +1394,7 @@ def print_console_summary(case_summaries, estimator_summary, runtime_quality, ov
                 f"[{case_name}] success={format_float(summary['success_rate_pct'], 2)} % | "
                 f"case_score={format_float(summary['case_score_pct'], 2)} % | "
                 f"EE_RMSE={format_float(summary['compensated_ee_rmse_cm'], 2)} cm | "
+                f"RPY_RMSE={format_float(summary['ee_rpy_rmse_deg'], 2)} deg | "
                 f"base_RMSE={format_float(summary['base_comp_vel_rmse_mps'], 3)} m/s"
             )
     print("")

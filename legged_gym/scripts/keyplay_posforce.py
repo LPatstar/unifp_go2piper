@@ -16,7 +16,7 @@ PRINT_EVERY_STEPS = 30
 
 
 def print_key_help(draw_mode=False, torque_recording=False):
-    print("Keyplay controls for go2_piper:")
+    print("Keyplay controls for position-force task:")
     print("  W/S : forward velocity +/-")
     print("  A/D : lateral velocity +/-")
     print("  Q/E : yaw rate +/- (Q is CCW)")
@@ -163,5 +163,5 @@ def keyplay(args):
 if __name__ == "__main__":
     args = get_args(custom_parameters=play_impl.DRAW_JOINT_CUSTOM_PARAMETERS)
     if not getattr(args, "task", None):
-        args.task = "go2_piper_pos_force"
+        args.task = "b2z1_pos_force"
     keyplay(args)
