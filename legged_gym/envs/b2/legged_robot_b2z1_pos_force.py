@@ -137,7 +137,7 @@ class LeggedRobot_b2z1_pos_force(BaseTask):
                 # push gripper
                 self._push_gripper(torch.arange(self.num_envs, device=self.device))      
                 # push robot base 
-                self._push_robot_base(torch.arange(self.num_envs, device=self.device)) 
+                # self._push_robot_base(torch.arange(self.num_envs, device=self.device)) 
             self.gym.apply_rigid_body_force_tensors(self.sim, gymtorch.unwrap_tensor(self.forces), None, gymapi.GLOBAL_SPACE)
             self.gym.simulate(self.sim)
             self.gym.refresh_dof_state_tensor(self.sim)

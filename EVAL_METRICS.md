@@ -634,3 +634,17 @@ python eval_posforce.py --load_run=<run_name> --headless
 - 这个策略是否已经能稳定完成真实接触任务
 
 如果后面你要往真实 task benchmark 走，可以在这套脚本之外，再补一层 object/task-level 评测。
+
+## 13. 精简版 Eval：`eval_posforce_lite.py`
+
+精简版脚本位于 `legged_gym/scripts/eval_posforce_lite.py`，命令行参数保持和 `eval_posforce.py` 一致。终端和 report 都只保留每个 task 两行核心结果：
+
+- 第一行：`Success Rate` 和成功判据
+- 第二行：与成功判据直接对应的 `MAE`
+
+当前包含的 task：
+
+- `position_only_static`：不发送 `vx/vy/yaw` 指令，只评估 EE position-only reach；成功判据为最后 `0.25s` 的 EE-target 距离均值 `<= 1 cm`。
+- `base_command_tracking`：评估 `vx/vy/yaw` command tracking；成功判据为最后 `0.25s` 的 `|vx error| <= 0.05 m/s`、`|vy error| <= 0.05 m/s`、`|yaw-rate error| <= 0.10 rad/s`。
+- `arm_force_estimation`：沿手臂 EE 的 `x/y/z` 方向分别施加外力，评估 force estimator；B2Z1 使用原 eval 的范围：`x` 轴 `[-60, 60] N`，`y/z` 轴 `[-40, 40] N`；成功判据为最后 `0.25s` 的 active-axis force AE `<= 6 N`。
+- `position_only_moving`：发送 `vx/vy` 指令时评估 EE position-only reach；成功判据同 `position_only_static`，即最后 `0.25s` 的 EE-target 距离均值 `<= 1 cm`。
