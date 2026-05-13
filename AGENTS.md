@@ -37,10 +37,22 @@ cd legged_gym/scripts
 python train_go2piperposforce.py --headless
 ```
 
+High-level door teacher train:
+```bash
+cd legged_gym/scripts
+python train_b2z1dooropen.py --headless
+```
+
 Play:
 ```bash
 cd legged_gym/scripts
 python play_b2z1posforce.py --load_run=<run_name>
+```
+
+High-level door teacher play:
+```bash
+cd legged_gym/scripts
+python play_b2z1dooropen.py --load_run=<run_name> --checkpoint=<N>
 ```
 
 Go2+Piper play:
@@ -89,10 +101,22 @@ Shared base config inherited by Go2:
 
 Training stack:
 - `legged_gym/b2_gym_learn/ppo_cse_pf/`
+- `StateTeacherActorCritic` in `legged_gym/b2_gym_learn/ppo_cse_pf/actor_critic.py` is the plain state-based high-level teacher policy class used by `b2z1_door_open`; its MLP widths follow the doorgym teacher shape `[512, 256, 128]`, while the original `ActorCritic` remains the UniFP low-level adaptation actor-critic.
 
 Task registration:
 - `legged_gym/envs/__init__.py`
 - `legged_gym/utils/task_registry.py`
+
+High-level door migration:
+- `legged_gym/envs/door/b2z1_door_open_config.py`
+- `legged_gym/envs/door/legged_robot_b2z1_door_open.py`
+- `legged_gym/envs/door/unifp_low_level_adapter.py`
+- `legged_gym/envs/door/door_asset_adapter.py`
+- `legged_gym/scripts/train_b2z1dooropen.py`
+- `legged_gym/scripts/play_b2z1dooropen.py`
+- `legged_gym/scripts/play_b2z1dooropen_asset.py`
+- `legged_gym/scripts/play_b2z1dooropen_walk.py`
+- `legged_gym/scripts/play_b2z1dooropen_scripted.py`
 
 ## Architectural Notes
 
@@ -118,6 +142,13 @@ Task registration:
 
 ## Script Behavior Notes
 
+- `train_b2z1dooropen.py` trains the state-based high-level door teacher for `b2z1_door_open` while freezing the configured B2+Z1 UniFP low-level policy.
+- `b2z1_door_open` uses `StateTeacherActorCritic` instead of the low-level adaptation `ActorCritic`, so the high-level teacher is a direct state PPO policy and does not train a low-level latent estimator.
+- `play_b2z1dooropen.py` loads a trained high-level door teacher checkpoint and prints door progress metrics during rollout.
+- `play_b2z1dooropen_asset.py` validates door asset loading, actor/DOF/tensor shapes, and basic zero-action stepping. It defaults to `--low_level_policy_mode zero` so it does not require a low-level checkpoint.
+- `play_b2z1dooropen_walk.py` keeps the door in the scene and sends base-forward high-level commands through the adapter to inspect whether the frozen low-level still walks near the door.
+- `play_b2z1dooropen_scripted.py` is a scripted high-level sanity check, not a policy-performance benchmark. `--joint_assist` directly advances door/handle DOFs and should only be used to validate state/reward plumbing.
+- Door teacher training logs door-specific episode metrics such as `door_success_rate`, `door_open_ratio`, `handle_open_ratio`, `open_stage_rate`, `closest_ee_handle_dist`, and `base_door_dist`.
 - `train_b2z1posforce.py` and `play_b2z1posforce.py` are the B2+Z1 entry points and default to `b2z1_pos_force`.
 - `train_go2piperposforce.py` and `play_go2piperposforce.py` are the Go2+Piper entry points and default to `go2_piper_pos_force`. The Go2 play wrapper enables force visualization / play-side command-force behavior through module flags.
 - `eval_posforce.py` and `keyplay_posforce.py` are generic position-force entry points and default to `b2z1_pos_force`; pass `--task=go2_piper_pos_force` when using them on Go2+Piper runs.

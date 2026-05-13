@@ -179,6 +179,122 @@ class ActorCritic(nn.Module):
         obs_pred = self.adaptation_decoder_module(latent)
         return obs_pred
 
+
+class StateTeacherActorCritic(nn.Module):
+    """Plain state-based actor-critic for high-level teacher PPO tasks.
+
+    The low-level UniFP policy uses ``ActorCritic`` with an adaptation encoder and
+    decoder. Door-opening high-level teacher training should not inherit that
+    latent-estimation structure, so this class keeps the same runner interface
+    while using direct state observations for the actor and privileged state for
+    the critic.
+    """
+
+    is_recurrent = False
+
+    def __init__(
+        self,
+        num_obs,
+        num_privileged_obs,
+        num_obs_pred,
+        num_single_obs,
+        num_actions,
+        actor_hidden_dims=[256, 256, 256],
+        critic_hidden_dims=[256, 256, 256],
+        activation="elu",
+        init_noise_std=1.0,
+        **kwargs,
+    ):
+        if kwargs:
+            print(
+                "StateTeacherActorCritic.__init__ got unexpected arguments, which will be ignored: "
+                + str([key for key in kwargs.keys()])
+            )
+        super().__init__()
+
+        self.adaptation_labels = []
+        self.adaptation_dims = []
+        self.adaptation_weights = []
+
+        self.num_obs = num_obs
+        self.num_privileged_obs = num_privileged_obs
+        self.num_obs_pred = num_obs_pred
+        self.num_obs_now = num_single_obs
+        self.num_actions = num_actions
+
+        activation = get_activation(activation)
+
+        actor_layers = []
+        actor_layers.append(nn.Linear(num_obs, actor_hidden_dims[0]))
+        actor_layers.append(activation)
+        for layer_idx in range(len(actor_hidden_dims)):
+            if layer_idx == len(actor_hidden_dims) - 1:
+                actor_layers.append(nn.Linear(actor_hidden_dims[layer_idx], num_actions))
+            else:
+                actor_layers.append(nn.Linear(actor_hidden_dims[layer_idx], actor_hidden_dims[layer_idx + 1]))
+                actor_layers.append(activation)
+        self.actor_body = nn.Sequential(*actor_layers)
+
+        critic_layers = []
+        critic_layers.append(nn.Linear(num_privileged_obs, critic_hidden_dims[0]))
+        critic_layers.append(activation)
+        for layer_idx in range(len(critic_hidden_dims)):
+            if layer_idx == len(critic_hidden_dims) - 1:
+                critic_layers.append(nn.Linear(critic_hidden_dims[layer_idx], 1))
+            else:
+                critic_layers.append(nn.Linear(critic_hidden_dims[layer_idx], critic_hidden_dims[layer_idx + 1]))
+                critic_layers.append(activation)
+        self.critic_body = nn.Sequential(*critic_layers)
+
+        print(f"State Teacher Actor MLP: {self.actor_body}")
+        print(f"State Teacher Critic MLP: {self.critic_body}")
+
+        self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
+        self.distribution = None
+        Normal.set_default_validate_args = False
+
+    @property
+    def action_mean(self):
+        return self.distribution.mean
+
+    @property
+    def action_std(self):
+        return self.distribution.stddev
+
+    @property
+    def entropy(self):
+        return self.distribution.entropy().sum(dim=-1)
+
+    def reset(self, dones=None):
+        pass
+
+    def update_distribution(self, observations):
+        mean = self.actor_body(observations)
+        self.distribution = Normal(mean, mean * 0.0 + self.std)
+
+    def act(self, observations, **kwargs):
+        self.update_distribution(observations)
+        return self.distribution.sample()
+
+    def get_actions_log_prob(self, actions):
+        return self.distribution.log_prob(actions).sum(dim=-1)
+
+    def act_inference(self, ob, policy_info={}):
+        return self.act_student(ob["obs"], policy_info=policy_info)
+
+    def act_student(self, observations, policy_info={}):
+        policy_info["latents"] = None
+        return self.actor_body(observations)
+
+    def act_expert(self, ob, policy_info={}):
+        return self.act_student(ob["obs"], policy_info=policy_info)
+
+    def evaluate(self, critic_observations, **kwargs):
+        return self.critic_body(critic_observations)
+
+    def get_student_latent(self, observations):
+        return torch.zeros(observations.shape[0], self.num_obs_pred, dtype=observations.dtype, device=observations.device)
+
 def get_activation(act_name):
     if act_name == "elu":
         return nn.ELU()

@@ -107,6 +107,57 @@ Default task behavior:
 - `train_go2piperposforce.py` / `play_go2piperposforce.py`: default to `go2_piper_pos_force`
 - `eval_posforce.py` / `keyplay_posforce.py`: generic scripts, default to `b2z1_pos_force`; add `--task=go2_piper_pos_force` when inspecting Go2+Piper runs
 
+#### High-Level Door Opening Migration
+
+The first high-level migration task is registered as `b2z1_door_open`. It exposes a compact door-task action space to the high-level policy, converts those actions through a UniFP low-level adapter, and executes the existing B2+Z1 position-force controller as the low-level policy.
+
+The current migration includes an asset-backed door metadata layer and a physical door actor path using lever-door assets under `resources/objects/door_set/`. The high-level task keeps the door/root/DOF tensors behind a door module, while the frozen UniFP low-level still receives only the wrapped command interface.
+
+High-level teacher PPO uses a state-only actor-critic class, `StateTeacherActorCritic`, instead of the UniFP low-level adaptation actor-critic. Its actor and critic MLP widths follow the doorgym teacher shape `[512, 256, 128]`, while the training backend stays compatible with UniFP's `OnPolicyRunner`.
+
+```bash
+cd legged_gym/scripts
+python train_b2z1dooropen.py --headless
+```
+
+Play a trained high-level door teacher:
+
+```bash
+cd legged_gym/scripts
+python play_b2z1dooropen.py --load_run=<run_name> --checkpoint=<N>
+```
+
+Door asset / tensor smoke test:
+
+```bash
+cd legged_gym/scripts
+python play_b2z1dooropen_asset.py --headless --num_envs 4
+```
+
+Door-loaded low-level walking smoke test:
+
+```bash
+cd legged_gym/scripts
+python play_b2z1dooropen_walk.py --headless --num_envs 4 --low_level_load_run=<run_name> --low_level_checkpoint=<N>
+```
+
+Scripted high-level door sanity check:
+
+```bash
+cd legged_gym/scripts
+python play_b2z1dooropen_scripted.py --headless --num_envs 4 --low_level_policy_mode zero --pin_base --joint_assist
+```
+
+Useful adapter/debug options:
+
+- `--low_level_load_run <run_name>`: choose the frozen B2+Z1 low-level run under `logs/b2z1_pos_force/`
+- `--low_level_checkpoint <N>`: choose the frozen low-level checkpoint
+- `--low_level_policy_mode zero`: run adapter-only smoke tests without loading a low-level checkpoint
+
+During high-level teacher training, door-specific episode metrics are logged with the normal PPO episode summaries, including success rate, door/handle open ratios, open-stage rate, EE-to-handle distance, closest EE-to-handle distance, and base-door distance.
+
+The high-level task code lives under `legged_gym/envs/door/`. The high-level environment should depend on the named adapter contract there, not raw UniFP command indices.
+
 ### Policy Evaluation and Testing
 
 #### Run Trained Policies

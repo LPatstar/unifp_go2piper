@@ -38,7 +38,7 @@ import torch
 import wandb
 from datetime import datetime
 from legged_gym.b2_gym_learn.ppo_cse_pf.ppo import PPO
-from legged_gym.b2_gym_learn.ppo_cse_pf.actor_critic import ActorCritic
+from legged_gym.b2_gym_learn.ppo_cse_pf.actor_critic import ActorCritic, StateTeacherActorCritic
 from legged_gym.b2_gym_learn.env import VecEnv
 
 

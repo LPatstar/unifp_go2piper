@@ -271,46 +271,7 @@ Expected limitation:
 
 - Pure position control may struggle with sustained handle pressure and pulling under contact.
 
-## Phase 6: Add Force-Aware High-Level Control
-
-Goal:
-
-- Use UniFP's extra force information and commanded-force path to make door opening more robust.
-
-Candidate high-level force actions:
-
-- 1-D force along handle press direction
-- 1-D force along door opening direction
-- 3-D EE local force command
-
-Recommended staged design:
-
-1. Start with 1-D force along known task direction.
-2. Add force magnitude limits and smoothness penalties.
-3. Add observation of estimated/measured EE force.
-4. Reward force direction alignment, not just force magnitude.
-5. Penalize excessive force and unstable base reaction.
-
-Potential benefits:
-
-- Better handle press detection.
-- More robust pulling/pushing after contact.
-- Reduced dependence on exact position target placement.
-- Better behavior under door friction and stiffness randomization.
-
-Important distinction:
-
-- UniFP's `self.forces` is currently an external force injection path.
-- Door opening needs contact/interaction force information.
-- Do not confuse commanded/external force buffers with measured handle contact force.
-
-Recommended future improvement:
-
-- Add or aggregate real EE/handle contact force signals.
-- Expose them through `LowLevelState`.
-- Keep force sensing and force command fields separate in the adapter API.
-
-## Phase 7: Low-Level Finetuning Only If Needed
+## Phase 6: Low-Level Finetuning Only If Needed
 
 Goal:
 
@@ -371,3 +332,76 @@ scripted high-level door command
 
 Only after this milestone should high-level PPO training be added.
 
+## Current Starter Migration
+
+The initial migration now provides the modular high/low boundary and a
+registered high-level task shell:
+
+- task: `b2z1_door_open`
+- config: `legged_gym/envs/door/b2z1_door_open_config.py`
+- high-level env: `legged_gym/envs/door/legged_robot_b2z1_door_open.py`
+- adapter/interface: `legged_gym/envs/door/unifp_low_level_adapter.py`
+- door asset metadata: `legged_gym/envs/door/door_asset_adapter.py`
+- imported lever-door assets: `resources/objects/door_set/`
+- train entry point: `legged_gym/scripts/train_b2z1dooropen.py`
+- learned teacher play entry point: `legged_gym/scripts/play_b2z1dooropen.py`
+- door asset smoke test: `legged_gym/scripts/play_b2z1dooropen_asset.py`
+- door-loaded walking smoke test: `legged_gym/scripts/play_b2z1dooropen_walk.py`
+- scripted high-level sanity check: `legged_gym/scripts/play_b2z1dooropen_scripted.py`
+
+The current shell now includes imported lever-door metadata, a physical door
+actor path, and a frozen B2+Z1 UniFP low-level checkpoint. The door task owns the
+full actor/root/DOF tensors and exposes robot-only views back to UniFP, so the
+low-level command and observation contract stays unchanged. It exposes the
+state-based high-level teacher observation, handle alignment target, door/handle
+DOFs, door directions, dense stage rewards, door lock/resistance torque behavior,
+and success/early-failure termination. The current high-level observation has an
+explicit `113`-D active contract plus `15` reserved zero dimensions. Dimension
+mismatches should raise errors instead of being silently padded or truncated.
+The door teacher uses `StateTeacherActorCritic`, a plain state-based PPO
+actor-critic with doorgym-style `[512, 256, 128]` actor/critic MLP widths,
+instead of the UniFP low-level adaptation actor-critic. This keeps the high-level
+teacher training aligned with the original state-teacher design and avoids
+coupling door PPO to low-level latent prediction.
+Door teacher training logs task metrics such as `door_success_rate`,
+`door_open_ratio`, `handle_open_ratio`, `open_stage_rate`,
+`closest_ee_handle_dist`, and `base_door_dist` through the normal PPO episode
+summary path. Asset, walking, scripted, and learned-teacher play scripts are
+separate so high-level/low-level interface debugging does not get mixed with
+policy-quality evaluation.
+Force-aware high-level actions and force observations remain intentionally
+disabled in this stage.
+
+Still not done in this migration stage:
+
+- diffusion / BC / DAgger dataset generation
+- trained high-level door policy
+- force-aware high-level action expansion
+- low-level finetuning for door contact
+
+## Future Optional Direction: UniFP Force-Assisted Door Opening
+
+This is a future exploration direction, not part of the current goal of first
+running the original state-based high-level door task.
+
+After the original high-level PPO door task is running, UniFP's position-force
+capabilities can be added as a separate extension:
+
+- expose EE commanded force as optional high-level action dimensions
+- expose measured or estimated EE/handle contact force through `LowLevelState`
+- keep commanded force, external disturbance force, estimated force, and real
+  contact force as separate fields
+- add force direction rewards only after position-only opening has a stable
+  baseline
+- use force signals to improve handle pressing, sustained pulling, and robustness
+  to door friction/stiffness randomization
+
+Potential future observation additions should also stay out of the current
+baseline until there is evidence they help:
+
+- `reach_success`: binary flag for whether the EE has reached the handle region
+- `asset_id`: normalized door asset id for multi-door specialization
+- compact force/contact diagnostics from UniFP
+
+These additions should consume explicitly named reserved observation slots or
+increase the declared observation contract in config and code together.
