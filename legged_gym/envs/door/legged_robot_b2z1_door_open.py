@@ -44,7 +44,9 @@ class LeggedRobot_b2z1_door_open(LeggedRobot_b2z1_pos_force):
 
     The class intentionally has two public contracts:
 
-    - high-level contract exposed to PPO: 9-D door actions and compact state obs
+    - high-level contract exposed to PPO: 9-D door actions and compact state obs.
+      Action dim 6 maps to a named gripper command when ``use_gripper_action``
+      is enabled.
     - low-level contract hidden behind ``UniFPLowLevelCommandAdapter``: UniFP
       command buffers plus a frozen 17-D low-level policy
 
@@ -869,6 +871,8 @@ class LeggedRobot_b2z1_door_open(LeggedRobot_b2z1_pos_force):
 
         action_clip = float(getattr(self.cfg.high_level, "action_clip", self.cfg.normalization.clip_actions))
         self.high_level_actions[:] = torch.clamp(actions.to(self.device), -action_clip, action_clip)
+        if not bool(getattr(self.cfg.high_level, "use_gripper_action", False)) and self.num_actions > 6:
+            self.high_level_actions[:, 6] = 0.0
 
         command = self.low_level_command_adapter.command_from_high_level_action(self.high_level_actions)
         self.low_level_command_adapter.apply_command(command)
@@ -1023,10 +1027,78 @@ class LeggedRobot_b2z1_door_open(LeggedRobot_b2z1_pos_force):
         self.prev_ee_handle_dist = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self.curr_dist = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self.closest_dist = torch.full((self.num_envs,), -1.0, dtype=torch.float, device=self.device)
+        self._init_high_level_gripper_buffers()
         self._reset_door_task_buffers(torch.arange(self.num_envs, dtype=torch.long, device=self.device))
 
     def _door_vec(self, values):
         return torch.tensor(values, dtype=torch.float, device=self.device).view(1, 3).repeat(self.num_envs, 1)
+
+    def _init_high_level_gripper_buffers(self):
+        num_gripper = int(self.cfg.env.num_gripper_joints)
+        default_target = self.default_dof_pos[:, self.num_torques : self.num_torques + num_gripper].repeat(
+            self.num_envs, 1
+        )
+        self.high_level_gripper_target = default_target.clone()
+        self.high_level_gripper_command = torch.ones(self.num_envs, 1, dtype=torch.float, device=self.device)
+
+        substrings = tuple(getattr(self.cfg.high_level, "gripper_control_joint_name_substrings", []))
+        mask = []
+        for local_idx in range(num_gripper):
+            dof_name = self.dof_names[self.num_torques + local_idx]
+            mask.append(any(name in dof_name for name in substrings))
+        if num_gripper > 0 and not any(mask):
+            mask[-1] = True
+        self.high_level_gripper_control_mask = torch.tensor(mask, dtype=torch.bool, device=self.device)
+
+    def _gripper_action_to_target(self, gripper_cmd, env_ids):
+        num_gripper = int(self.cfg.env.num_gripper_joints)
+        target = self.default_dof_pos[:, self.num_torques : self.num_torques + num_gripper].repeat(len(env_ids), 1)
+        if num_gripper == 0:
+            return target
+
+        open_target = float(getattr(self.cfg.high_level, "gripper_open_target", 0.0))
+        closed_target = float(getattr(self.cfg.high_level, "gripper_closed_target", -1.25))
+        cmd = torch.clamp(gripper_cmd.to(self.device).view(-1, 1), -1.0, 1.0)
+        controlled_target = 0.5 * ((1.0 + cmd) * open_target + (1.0 - cmd) * closed_target)
+        num_controlled = int(self.high_level_gripper_control_mask.sum().item())
+        if num_controlled > 0:
+            target[:, self.high_level_gripper_control_mask] = controlled_target.expand(-1, num_controlled)
+
+        limit_slice = slice(self.num_torques, self.num_torques + num_gripper)
+        lower = self.dof_pos_limits[limit_slice, 0].view(1, -1)
+        upper = self.dof_pos_limits[limit_slice, 1].view(1, -1)
+        return torch.max(torch.min(target, upper), lower)
+
+    def set_high_level_gripper_command(self, gripper_cmd, env_ids=None):
+        if not bool(getattr(self.cfg.high_level, "use_gripper_action", False)):
+            return
+        if env_ids is None:
+            env_ids = torch.arange(self.num_envs, dtype=torch.long, device=self.device)
+        if len(env_ids) == 0:
+            return
+        cmd = torch.clamp(gripper_cmd.to(self.device).view(-1, 1), -1.0, 1.0)
+        self.high_level_gripper_command[env_ids] = cmd
+        self.high_level_gripper_target[env_ids] = self._gripper_action_to_target(cmd, env_ids)
+
+    def _get_pd_equivalent_gripper_targets(self):
+        if bool(getattr(self.cfg.high_level, "use_gripper_action", False)) and hasattr(self, "high_level_gripper_target"):
+            return self.high_level_gripper_target
+        return super()._get_pd_equivalent_gripper_targets()
+
+    def _get_gripper_close_ratio(self):
+        if not hasattr(self, "high_level_gripper_control_mask") or not torch.any(self.high_level_gripper_control_mask):
+            return torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+
+        gripper_pos = self.dof_pos[:, self.num_torques : self.num_torques + int(self.cfg.env.num_gripper_joints)]
+        controlled_pos = gripper_pos[:, self.high_level_gripper_control_mask]
+        open_target = float(getattr(self.cfg.high_level, "gripper_open_target", 0.0))
+        closed_target = float(getattr(self.cfg.high_level, "gripper_closed_target", -1.25))
+        denom = max(abs(open_target - closed_target), 1e-6)
+        if closed_target < open_target:
+            ratio = (open_target - controlled_pos) / denom
+        else:
+            ratio = (controlled_pos - open_target) / denom
+        return torch.clamp(ratio.mean(dim=1), 0.0, 1.0)
 
     def _reset_door_task_buffers(self, env_ids):
         self.door_handle_closed_pos_world[env_ids] = self.env_origins[env_ids] + self._door_handle_closed_pos_env
@@ -1043,6 +1115,9 @@ class LeggedRobot_b2z1_door_open(LeggedRobot_b2z1_pos_force):
         self.door_open_hold_counter[env_ids] = 0
         self._door_dof_pos[env_ids] = 0.0
         self._door_dof_vel[env_ids] = 0.0
+        if hasattr(self, "high_level_gripper_command"):
+            open_cmd = torch.ones(len(env_ids), 1, dtype=torch.float, device=self.device)
+            self.set_high_level_gripper_command(open_cmd, env_ids)
         self._update_door_derived_state(env_ids)
         if self._use_physical_door():
             self.door_handle_closed_pos_world[env_ids] = self.door_handle_pos_world[env_ids]
@@ -1070,6 +1145,7 @@ class LeggedRobot_b2z1_door_open(LeggedRobot_b2z1_pos_force):
         ee_pos_local = quat_rotate_inverse(self.base_quat, self.ee_pos - arm_base_pos)
         ee_rot_local = quat_mul(quat_conjugate(self.base_quat), self.ee_orn)
         ee_rot_local_rpy = torch.stack(euler_from_quat(ee_rot_local), dim=1)
+        ee_vel_local = quat_rotate_inverse(self.base_quat, low_state.ee_vel_world)
         ee_to_handle_local = quat_rotate_inverse(self.base_quat, self.grasp_goal_world - self.ee_pos)
         door_root_local = quat_rotate_inverse(self.base_yaw_quat, door_root_pos - arm_base_pos)
         ee_handle_dist = self.curr_dist.unsqueeze(1)
@@ -1077,6 +1153,15 @@ class LeggedRobot_b2z1_door_open(LeggedRobot_b2z1_pos_force):
             :, :-self.cfg.env.num_gripper_joints
         ]
         robot_dof_vel = (self.dof_vel * self.obs_scales.dof_vel)[:, :-self.cfg.env.num_gripper_joints]
+        gripper_slice = slice(self.num_torques, self.num_torques + int(self.cfg.env.num_gripper_joints))
+        gripper_dof_pos = ((self.dof_pos[:, gripper_slice] - self.default_dof_pos[:, gripper_slice]) * self.obs_scales.dof_pos)
+        gripper_dof_vel = self.dof_vel[:, gripper_slice] * self.obs_scales.dof_vel
+        gripper_target = (
+            (self.high_level_gripper_target - self.default_dof_pos[:, gripper_slice]) * self.obs_scales.dof_pos
+            if hasattr(self, "high_level_gripper_target")
+            else torch.zeros_like(gripper_dof_pos)
+        )
+        gripper_close_ratio = self._get_gripper_close_ratio().unsqueeze(1)
         low_level_position_command = low_state.command_buffer[:, :9] * self.commands_scale[:9]
 
         obs_parts = [
@@ -1092,16 +1177,23 @@ class LeggedRobot_b2z1_door_open(LeggedRobot_b2z1_pos_force):
             door_root_local,
             self._door_dof_pos[:, 0:1],
             self._door_dof_pos[:, 1:2],
+            self._door_dof_vel[:, 0:1],
+            self._door_dof_vel[:, 1:2],
             self.door_open_ratio.unsqueeze(1),
             self.handle_open_ratio.unsqueeze(1),
             self.open_door_stage.to(dtype=torch.float).unsqueeze(1),
             self.base_door_dis.unsqueeze(1),
             ee_handle_dist,
+            ee_vel_local,
             low_state.base_lin_vel_local,
             low_state.base_ang_vel_local,
             self.projected_gravity,
             robot_dof_pos,
             robot_dof_vel,
+            gripper_dof_pos,
+            gripper_dof_vel,
+            gripper_target,
+            gripper_close_ratio,
             low_level_position_command,
             low_state.ee_goal_local_cart,
             low_state.ee_goal_local_rpy,
@@ -1132,10 +1224,13 @@ class LeggedRobot_b2z1_door_open(LeggedRobot_b2z1_pos_force):
 
     def _prepare_door_reward_function(self):
         self.reward_scales = class_to_dict(self.cfg.door_rewards.scales)
+        non_dt_scaled = set(getattr(self.cfg.door_rewards, "non_dt_scaled", []))
         for key in list(self.reward_scales.keys()):
             scale = self.reward_scales[key]
             if scale == 0:
                 self.reward_scales.pop(key)
+            elif key in non_dt_scaled:
+                self.reward_scales[key] = scale
             else:
                 self.reward_scales[key] *= self.dt
 
@@ -1177,8 +1272,9 @@ class LeggedRobot_b2z1_door_open(LeggedRobot_b2z1_pos_force):
             )
             self.handle_rotate_dir_world[env_ids] = quat_apply(handle_rot, self._handle_rotate_dir_local[env_ids])
             self.door_open_dir_world[env_ids] = quat_apply(self.door_yaw_quat[env_ids], self._door_open_dir_local[env_ids])
+            pregrasp_offset = float(getattr(self.cfg.door, "pregrasp_offset", 0.18))
             self.pregrasp_goal_world[env_ids] = (
-                self.grasp_goal_world[env_ids] + self.handle_approach_dir_world[env_ids] * 0.18
+                self.grasp_goal_world[env_ids] + self.handle_approach_dir_world[env_ids] * pregrasp_offset
             )
 
             dof_range = torch.clamp(self.door_dof_upper[env_ids] - self.door_dof_lower[env_ids], min=1e-3)
@@ -1214,7 +1310,8 @@ class LeggedRobot_b2z1_door_open(LeggedRobot_b2z1_pos_force):
         self.grasp_goal_world[env_ids] = self.door_handle_pos_world[env_ids] + goal_offset
         down_quat = torch.tensor([0.0, 1.0, 0.0, 0.0], dtype=torch.float, device=self.device).repeat(len(env_ids), 1)
         self.handle_target_rot[env_ids] = quat_mul(self.door_yaw_quat[env_ids], down_quat)
-        self.pregrasp_goal_world[env_ids] = self.grasp_goal_world[env_ids] + self.handle_approach_dir_world[env_ids] * 0.18
+        pregrasp_offset = float(getattr(self.cfg.door, "pregrasp_offset", 0.18))
+        self.pregrasp_goal_world[env_ids] = self.grasp_goal_world[env_ids] + self.handle_approach_dir_world[env_ids] * pregrasp_offset
 
         dof_range = torch.clamp(self.door_dof_upper[env_ids] - self.door_dof_lower[env_ids], min=1e-3)
         hinge_range = torch.clamp(
@@ -1247,7 +1344,9 @@ class LeggedRobot_b2z1_door_open(LeggedRobot_b2z1_pos_force):
     def get_grasp_goal_world(self):
         return self.grasp_goal_world.clone()
 
-    def get_pregrasp_goal_world(self, offset=0.18):
+    def get_pregrasp_goal_world(self, offset=None):
+        if offset is None:
+            offset = float(getattr(self.cfg.door, "pregrasp_offset", 0.18))
         return self.grasp_goal_world + self.handle_approach_dir_world * float(offset)
 
     def scripted_actions_from_world_targets(self, target_pos_world, target_rot_world, gripper_open, base_x_cmd, yaw_cmd):
@@ -1268,11 +1367,12 @@ class LeggedRobot_b2z1_door_open(LeggedRobot_b2z1_pos_force):
             gripper_open_tensor = gripper_open.to(device=self.device, dtype=torch.bool)
         else:
             gripper_open_tensor = torch.full((self.num_envs,), bool(gripper_open), dtype=torch.bool, device=self.device)
-        actions[:, 6] = torch.where(
-            gripper_open_tensor,
-            torch.ones(self.num_envs, dtype=torch.float, device=self.device),
-            -torch.ones(self.num_envs, dtype=torch.float, device=self.device),
-        )
+        if bool(getattr(self.cfg.high_level, "use_gripper_action", False)):
+            actions[:, 6] = torch.where(
+                gripper_open_tensor,
+                torch.ones(self.num_envs, dtype=torch.float, device=self.device),
+                -torch.ones(self.num_envs, dtype=torch.float, device=self.device),
+            )
 
         if not isinstance(base_x_cmd, torch.Tensor):
             base_x_cmd = torch.full((self.num_envs,), float(base_x_cmd), dtype=torch.float, device=self.device)
@@ -1285,10 +1385,17 @@ class LeggedRobot_b2z1_door_open(LeggedRobot_b2z1_pos_force):
         return actions
 
     def _reward_approach_handle(self):
-        dist_delta = torch.clamp(self.prev_ee_handle_dist - self.curr_dist, 0.0, 10.0)
+        dist_delta = torch.clamp(self.prev_ee_handle_dist - self.curr_dist, -0.05, 0.05)
         self.prev_ee_handle_dist[:] = self.curr_dist
         self.closest_dist[:] = torch.minimum(self.closest_dist, self.curr_dist)
         reward = torch.tanh(10.0 * dist_delta)
+        reward *= (~self.door_open_success).to(dtype=torch.float)
+        return reward
+
+    def _reward_pregrasp_position(self):
+        dist = torch.norm(self.pregrasp_goal_world - self.ee_pos, dim=1)
+        reward = torch.exp(-8.0 * dist)
+        reward *= (~self.open_door_stage).to(dtype=torch.float)
         reward *= (~self.door_open_success).to(dtype=torch.float)
         return reward
 
@@ -1296,14 +1403,15 @@ class LeggedRobot_b2z1_door_open(LeggedRobot_b2z1_pos_force):
         ee_orn = self.ee_orn / torch.clamp(torch.norm(self.ee_orn, dim=-1, keepdim=True), min=1e-6)
         metric = torch.norm(_orientation_error(self.handle_target_rot, ee_orn), dim=-1)
         reward = torch.exp(-3.0 * metric)
-        reward *= (self.curr_dist < 0.25).to(dtype=torch.float)
+        near_gate = torch.clamp((0.45 - self.curr_dist) / 0.25, 0.0, 1.0)
+        reward *= near_gate
         return reward
 
     def _reward_lever_press(self):
         progress = self.handle_open_ratio - self.best_handle_open_ratio
         self.best_handle_open_ratio[:] = torch.maximum(self.best_handle_open_ratio, self.handle_open_ratio)
         reward = torch.tanh(5.0 * torch.clamp(progress, min=0.0, max=1.0))
-        reward *= (self.curr_dist < 0.18).to(dtype=torch.float)
+        reward *= (self.curr_dist < 0.22).to(dtype=torch.float)
         reward *= (self.handle_open_ratio < float(self.cfg.door.handle_press_threshold_ratio) + 0.05).to(dtype=torch.float)
         return reward
 
@@ -1311,13 +1419,51 @@ class LeggedRobot_b2z1_door_open(LeggedRobot_b2z1_pos_force):
         progress = self.door_open_ratio - self.best_door_open_ratio
         self.best_door_open_ratio[:] = torch.maximum(self.best_door_open_ratio, self.door_open_ratio)
         reward = torch.tanh(5.0 * torch.clamp(progress, min=0.0, max=1.0))
-        reward *= (self.handle_open_ratio >= float(self.cfg.door.handle_press_threshold_ratio)).to(dtype=torch.float)
+        reward *= self.open_door_stage.to(dtype=torch.float)
         return reward
 
     def _reward_door_open_success(self):
-        newly_successful = self.door_open_success & (~self.success_recorded)
-        self.success_recorded |= self.door_open_success
+        newly_successful = self.door_open_success & self.open_door_stage & (~self.success_recorded)
+        self.success_recorded |= self.door_open_success & self.open_door_stage
         return newly_successful.to(dtype=torch.float)
+
+    def _reward_base_standoff(self):
+        rel_xy = self.base_pos[:, :2] - self.grasp_goal_world[:, :2]
+        approach_xy = self.handle_approach_dir_world[:, :2]
+        approach_xy = approach_xy / torch.clamp(torch.norm(approach_xy, dim=1, keepdim=True), min=1e-6)
+        along = torch.sum(rel_xy * approach_xy, dim=1)
+        lateral = torch.norm(rel_xy - along.unsqueeze(1) * approach_xy, dim=1)
+        target = float(getattr(self.cfg.door, "base_standoff_distance", 0.95))
+        reward = torch.exp(-4.0 * torch.abs(along - target)) * torch.exp(-8.0 * lateral)
+        reward *= (~self.door_open_success).to(dtype=torch.float)
+        return reward
+
+    def _reward_base_yaw_alignment(self):
+        forward_local = torch.zeros_like(self.handle_approach_dir_world)
+        forward_local[:, 0] = 1.0
+        forward_world = quat_apply(self.base_yaw_quat, forward_local)
+        desired_world = -self.handle_approach_dir_world
+        forward_xy = forward_world[:, :2]
+        desired_xy = desired_world[:, :2]
+        denom = torch.clamp(
+            torch.norm(forward_xy, dim=1) * torch.norm(desired_xy, dim=1),
+            min=1e-6,
+        )
+        alignment = torch.sum(forward_xy * desired_xy, dim=1) / denom
+        reward = torch.clamp((alignment + 1.0) * 0.5, 0.0, 1.0)
+        reward *= (~self.door_open_success).to(dtype=torch.float)
+        return reward
+
+    def _reward_gripper_close(self):
+        close_ratio = self._get_gripper_close_ratio()
+        near_gate = torch.clamp((0.24 - self.curr_dist) / 0.12, 0.0, 1.0)
+        far_gate = torch.clamp((self.curr_dist - 0.24) / 0.30, 0.0, 1.0)
+        far_gate *= (~self.open_door_stage).to(dtype=torch.float)
+        close_reward = near_gate * close_ratio
+        open_reward = 0.25 * far_gate * (1.0 - close_ratio)
+        reward = close_reward + open_reward
+        reward *= (~self.door_open_success).to(dtype=torch.float)
+        return reward
 
     def _reward_base_command_penalty(self):
         penalty = torch.where(
@@ -1328,9 +1474,15 @@ class LeggedRobot_b2z1_door_open(LeggedRobot_b2z1_pos_force):
         return penalty
 
     def _reward_action_rate(self):
-        return torch.sum(torch.square(self.high_level_actions - self.high_level_last_actions), dim=1)
+        delta = self.high_level_actions - self.high_level_last_actions
+        if not bool(getattr(self.cfg.high_level, "use_gripper_action", False)) and self.num_actions > 6:
+            delta = delta.clone()
+            delta[:, 6] = 0.0
+        return torch.sum(torch.square(delta), dim=1)
 
     def _reward_gripper_rate(self):
+        if not bool(getattr(self.cfg.high_level, "use_gripper_action", False)):
+            return torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         return torch.square(self.high_level_actions[:, 6] - self.high_level_last_actions[:, 6])
 
     def _reward_base_height(self):

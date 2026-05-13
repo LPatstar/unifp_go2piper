@@ -38,8 +38,8 @@ class B2Z1DoorOpenRoughCfg(B2Z1PosForceRoughCfg):
 
     class high_level:
         num_actions = 9
-        num_current_obs = 113
-        num_reserved_obs = 15
+        num_current_obs = 125
+        num_reserved_obs = 3
         num_single_obs = num_current_obs + num_reserved_obs
         num_observations = num_single_obs
         num_privileged_obs = num_single_obs
@@ -51,6 +51,10 @@ class B2Z1DoorOpenRoughCfg(B2Z1PosForceRoughCfg):
         ee_rpy_limit = [0.7, 0.7, 0.7]
         base_forward_scale = 0.35
         base_yaw_scale = 0.5
+        use_gripper_action = True
+        gripper_open_target = -0.16
+        gripper_closed_target = -1.25
+        gripper_control_joint_name_substrings = ["jointGripper", "finger", "gripper"]
 
         use_force_actions = False
         use_base_force_actions = False
@@ -92,6 +96,8 @@ class B2Z1DoorOpenRoughCfg(B2Z1PosForceRoughCfg):
         success_distance = 0.10
         terminate_on_reach = False
         base_door_distance_threshold = 0.85
+        base_standoff_distance = 0.95
+        pregrasp_offset = 0.18
         base_far_threshold = 2.0
         base_far_grace_steps = 80
         ee_far_threshold = 1.1
@@ -119,16 +125,27 @@ class B2Z1DoorOpenRoughCfg(B2Z1PosForceRoughCfg):
         base_height_target = 0.55
 
     class door_rewards:
+        non_dt_scaled = [
+            "approach_handle",
+            "lever_press",
+            "door_open_progress",
+            "door_open_success",
+        ]
+
         class scales:
-            approach_handle = 1.0
-            ee_align_handle = 0.15
-            lever_press = 1.0
-            door_open_progress = 2.0
-            door_open_success = 5.0
-            base_command_penalty = -0.05
+            approach_handle = 0.4
+            pregrasp_position = 0.35
+            ee_align_handle = 0.4
+            lever_press = 2.0
+            door_open_progress = 3.0
+            door_open_success = 8.0
+            base_standoff = 0.25
+            base_yaw_alignment = 0.1
+            gripper_close = 0.35
+            base_command_penalty = -0.03
             action_rate = -0.001
             gripper_rate = -0.001
-            base_height = 0.2
+            base_height = 0.05
 
 
 class B2Z1DoorOpenRoughCfgPPO(B2Z1PosForceRoughCfgPPO):

@@ -96,7 +96,7 @@ class UniFPLowLevelCommandAdapter:
             base_vel_local=base_vel_local,
             ee_goal_local_cart=ee_goal_local_cart,
             ee_goal_local_rpy=ee_goal_local_rpy,
-            gripper_cmd=actions[:, 6:7],
+            gripper_cmd=actions[:, 6:7] if bool(getattr(self.cfg, "use_gripper_action", False)) else None,
             ee_force_cmd_local=ee_force_cmd_local,
             base_force_cmd_local=base_force_cmd_local,
         )
@@ -133,6 +133,10 @@ class UniFPLowLevelCommandAdapter:
         self.env.ee_goal_orn_delta_rpy[env_ids] = command.ee_goal_local_rpy[env_ids]
         self.env.ee_start_orn_delta_rpy[env_ids] = command.ee_goal_local_rpy[env_ids]
         self.env.commands[env_ids, INDEX_EE_ROLL_CMD : INDEX_EE_YAW_CMD + 1] = command.ee_goal_local_rpy[env_ids]
+        if command.gripper_cmd is not None:
+            if not hasattr(self.env, "set_high_level_gripper_command"):
+                raise RuntimeError("High-level gripper action is enabled, but the environment has no gripper adapter.")
+            self.env.set_high_level_gripper_command(command.gripper_cmd[env_ids], env_ids)
 
         self.env.update_curr_ee_goal()
         self._write_force_commands(command, env_ids)
@@ -154,6 +158,9 @@ class UniFPLowLevelCommandAdapter:
             base_vel_local=full_zero3,
             ee_goal_local_cart=full_cart,
             ee_goal_local_rpy=full_rpy,
+            gripper_cmd=torch.ones(self.env.num_envs, 1, dtype=torch.float, device=self.env.device)
+            if bool(getattr(self.cfg, "use_gripper_action", False))
+            else None,
             ee_force_cmd_local=full_zero3,
             base_force_cmd_local=full_zero3,
         )
